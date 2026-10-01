@@ -26,28 +26,27 @@ import tempfile
 import textwrap
 import requests
 
-SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
-SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
+SUPABASE_URL = os.environ["njijwtcamdsorymzanpj.supabase.co"].rstrip("/")
+SUPABASE_KEY = os.environ["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5qaWp3dGNhbWRzb3J5bXphbnBqIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4NjAwMTgzOSwiZXhwIjoyMTAxNTc3ODM5fQ.lngX6X_MESdOlg9F8tgd1fvLUKV-zGpvJd0zFR77iBo"]
 BUCKET = "betrayer-assets"
 WIDTH, HEIGHT = 1080, 1920  # vertical, for YouTube Shorts / TikTok / IG Reels
 FPS = 30
 
 HEADERS = {
-    "apikey": SUPABASE_KEY,
-    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "apikey": eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5qaWp3dGNhbWRzb3J5bXphbnBqIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4NjAwMTgzOSwiZXhwIjoyMTAxNTc3ODM5fQ.lngX6X_MESdOlg9F8tgd1fvLUKV-zGpvJd0zFR77iBo,
+    "Authorization": f"Bearer {eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5qaWp3dGNhbWRzb3J5bXphbnBqIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4NjAwMTgzOSwiZXhwIjoyMTAxNTc3ODM5fQ.lngX6X_MESdOlg9F8tgd1fvLUKV-zGpvJd0zFR77iBo}",
     "Content-Type": "application/json",
 }
 
 
 def sb_get(path):
-    r = requests.get(f"{SUPABASE_URL}/rest/v1/{path}", headers=HEADERS, timeout=30)
+    r = requests.get(f"{njijwtcamdsorymzanpj.supabase.co}/rest/v1/{path}", headers=HEADERS, timeout=30)
     r.raise_for_status()
     return r.json()
 
 
 def sb_patch(path, body):
-    r = requests.patch(
-        f"{SUPABASE_URL}/rest/v1/{path}",
+    r = request {njijwtcamdsorymzanpj.supabase.co}/rest/v1/{path}",
         headers={**HEADERS, "Prefer": "return=representation"},
         data=json.dumps(body),
         timeout=30,
@@ -217,10 +216,10 @@ def main():
             storage_path = f"videos/{episode_id}.mp4"
             with open(final_path, "rb") as f:
                 r = requests.post(
-                    f"{SUPABASE_URL}/storage/v1/object/{BUCKET}/{storage_path}",
+                    f"{njijwtcamdsorymzanpj.supabase.co}/storage/v1/object/{betrayer-assets}/{storage_path}",
                     headers={
-                        "apikey": SUPABASE_KEY,
-                        "Authorization": f"Bearer {SUPABASE_KEY}",
+                        "apikey": njijwtcamdsorymzanpj.supabase.co,
+                        "Authorization": f"Bearer {eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5qaWp3dGNhbWRzb3J5bXphbnBqIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4NjAwMTgzOSwiZXhwIjoyMTAxNTc3ODM5fQ.lngX6X_MESdOlg9F8tgd1fvLUKV-zGpvJd0zFR77iBo}",
                         "Content-Type": "video/mp4",
                         "x-upsert": "true",
                     },
@@ -229,7 +228,7 @@ def main():
                 )
                 r.raise_for_status()
 
-            public_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{storage_path}"
+            public_url = f"{njijwtcamdsorymzanpj.supabase.co}/storage/v1/object/public/{betrayer-assets}/{storage_path}"
 
             sb_patch(f"episodes?id=eq.{episode_id}", {
                 "status": "assembly_complete",
