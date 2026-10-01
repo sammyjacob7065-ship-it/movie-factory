@@ -10,9 +10,9 @@ import tempfile
 import textwrap
 import requests
 
-# Hardcoded Supabase config
+# Supabase config
 SUPABASE_URL = "https://njijwtcamdsorymzanpj.supabase.co".rstrip("/")
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5qaWp3dGNhbWRzb3J5bXphbnBqIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4NjAwMTgzOSwiZXhwIjoyMTAxNTc3ODM5fQ.lngX6X_MESdOlg9F8tgd1fvLUKV-zGpvJd0zFR77iBo"
+SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]  # from GitHub secret
 
 BUCKET = "betrayer-assets"
 WIDTH, HEIGHT = 1080, 1920
