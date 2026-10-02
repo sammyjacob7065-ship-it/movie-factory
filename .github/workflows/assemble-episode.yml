@@ -28,4 +28,7 @@ jobs:
       - name: Assemble the episode
         env:
           MANIFEST_JSON: ${{ inputs.manifest }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_BUCKET: ${{ secrets.SUPABASE_BUCKET }}
         run: python assemble.py
