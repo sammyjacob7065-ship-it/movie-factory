@@ -280,10 +280,16 @@ def main():
     episode_id = manifest["episodeId"]
 
     try:
-        ep_rows = sb_get(f"episodes?id=eq.{episode_id}&select=script_lines,scenes,title")
+        ep_rows = sb_get(f"episodes?id=eq.{episode_id}&select=script_lines,scenes,title,status")
         if not ep_rows:
             raise RuntimeError(f"No episode found with id {episode_id}")
         ep = ep_rows[0]
+
+        # a duplicate request for an episode that is already built: do nothing
+        if ep.get("status") in ("assemblycomplete", "telegram_preview", "awaiting_approval", "archived"):
+            print(f"episode {episode_id} is already '{ep.get('status')}' - skipping duplicate build")
+            return
+
         script_lines = ep["script_lines"]
         scenes = sorted(ep["scenes"], key=lambda s: s["scene_number"])
 
@@ -381,10 +387,12 @@ def main():
 
             public_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{storage_path}"
 
-                        sb_patch(f"episodes?id=eq.{episode_id}&status=in.(assembly_running,assemblycomplete)", {
-                "status": "assemblycomplete",
-                "output_url": public_url,
-            })
+            updated = sb_patch(
+                f"episodes?id=eq.{episode_id}&status=in.(assembly_running,assemblycomplete,failed)",
+                {"status": "assemblycomplete", "output_url": public_url},
+            )
+            if not updated:
+                print("::warning::episode status was already moved on - not changing it")
             print(f"done: {public_url}")
 
     except Exception as e:
