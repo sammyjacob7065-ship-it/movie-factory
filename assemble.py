@@ -30,7 +30,7 @@ FPS = 30
 
 # ---------------- POLISH SETTINGS (edit here) ----------------
 ZOOM_AMOUNT = 0.12          # how far the slow zoom goes (0.12 = 12%)
-FADE_SECONDS = 0.35         # fade in/out at the start/end of each scene
+FADE_SECONDS = 0.30         # fade in/out at the start/end of each scene
 SCENE_TAIL_SECONDS = 0.4    # pause after each scene's narration
 SUB_FONT_SIZE = 52
 SUB_WRAP_CHARS = 26         # characters per subtitle line
