@@ -381,7 +381,7 @@ def main():
 
             public_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{storage_path}"
 
-            sb_patch(f"episodes?id=eq.{episode_id}", {
+                        sb_patch(f"episodes?id=eq.{episode_id}&status=in.(assembly_running,assemblycomplete)", {
                 "status": "assemblycomplete",
                 "output_url": public_url,
             })
