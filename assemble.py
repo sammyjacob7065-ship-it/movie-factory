@@ -10,6 +10,13 @@ Polish added on top of the original pipeline:
   - consistent audio format per scene (no glitches on join)
   - narration loudness levelled, background music ducked under the voice
   - faststart + capped bitrate (smaller, quicker-to-open file)
+
+NEW: animated clips.
+  When the manifest says "useAnimation": true and gives a clip for a scene
+  ({"scene_number": 3, "clip_url": "https://..."}), that scene is built from the
+  moving clip instead of the still image (same blurred 9:16 frame, same subtitles,
+  same fades, same voice). If a clip is missing or fails, the scene silently falls
+  back to its still image, so assembly never gets stuck.
 """
 
 import json
@@ -40,6 +47,7 @@ MUSIC_PATH = "assets/music/default.mp3"
 MUSIC_VOLUME = 0.25         # before ducking; it dips automatically under the voice
 VIDEO_CRF = 23              # lower = better quality, bigger file
 VIDEO_MAXRATE = "3M"        # caps file size
+CLIP_FILL_MODE = "loop"     # clip shorter than the narration: "loop" it, or "hold" its last frame
 # --------------------------------------------------------------
 
 FONT_CANDIDATES = [
@@ -244,6 +252,53 @@ def build_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, 
     ])
 
 
+def build_clip_segment(scene_index, clip_path, audio_path, duration, sub_text, tmp, segment_path):
+    """One scene from an animated clip: the clip is fitted to the 9:16 frame on a blurred
+    copy of itself (same look as the stills), then subtitles + fades + the scene's voice.
+    A clip shorter than the narration is looped (or its last frame is held); a longer one is cut."""
+    clip_dur = probe_duration(clip_path)
+    fade_out_start = max(duration - FADE_SECONDS, 0)
+    short = clip_dur < duration
+
+    chain = (
+        "[0:v]split=2[bgsrc][fgsrc];"
+        f"[bgsrc]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
+        f"crop={WIDTH}:{HEIGHT},boxblur=40:6,eq=brightness=-0.12[bg];"
+        f"[fgsrc]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease:flags=lanczos[fg];"
+        f"[bg][fg]overlay=(W-w)/2:(H-h)/2,fps={FPS}"
+    )
+    if short and CLIP_FILL_MODE == "hold":
+        chain += f",tpad=stop_mode=clone:stop_duration={duration - clip_dur + 0.5:.3f}"
+
+    steps = subtitle_filters(sub_text, duration, tmp, f"c{scene_index:03d}")
+    steps.append(f"fade=t=in:st=0:d={FADE_SECONDS}")
+    steps.append(f"fade=t=out:st={fade_out_start:.3f}:d={FADE_SECONDS}")
+    steps.append("format=yuv420p")
+    fc = chain + "," + ",".join(steps) + "[vout]"
+
+    af = (
+        f"afade=t=in:st=0:d=0.2,"
+        f"afade=t=out:st={max(duration - 0.25, 0):.3f}:d=0.25,"
+        "apad"
+    )
+
+    cmd = ["ffmpeg", "-y"]
+    if short and CLIP_FILL_MODE != "hold":
+        cmd += ["-stream_loop", "-1"]
+    cmd += [
+        "-i", clip_path,
+        "-i", audio_path,
+        "-filter_complex", fc,
+        "-map", "[vout]", "-map", "1:a",
+        "-af", af,
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", str(VIDEO_CRF),
+        "-maxrate", VIDEO_MAXRATE, "-bufsize", "6M", "-pix_fmt", "yuv420p", "-r", str(FPS),
+        "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+        "-t", f"{duration:.3f}", segment_path,
+    ]
+    run(cmd)
+
+
 def master_audio_and_music(final_path, out_path):
     """Level the narration, duck background music under it, and add faststart."""
     total = probe_duration(final_path)
@@ -278,6 +333,17 @@ def master_audio_and_music(final_path, out_path):
 def main():
     manifest = json.loads(os.environ["MANIFEST_JSON"])
     episode_id = manifest["episodeId"]
+
+    # animated clips offered by n8n: {scene_number: clip_url}
+    clip_by_scene = {}
+    if manifest.get("useAnimation"):
+        for c in manifest.get("clips") or []:
+            try:
+                if c and c.get("clip_url"):
+                    clip_by_scene[int(c["scene_number"])] = c["clip_url"]
+            except (TypeError, ValueError, KeyError):
+                continue
+    print(f"animated clips offered for {len(clip_by_scene)} scene(s)")
 
     try:
         ep_rows = sb_get(f"episodes?id=eq.{episode_id}&select=script_lines,scenes,title,status")
@@ -340,15 +406,6 @@ def main():
                     run(["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
                          "-t", str(duration), scene_audio_path])
 
-                image_path = os.path.join(tmp, f"s{scene_num}.png")
-                image_url = image_by_scene.get(scene_num)
-                if image_url:
-                    download(image_url, image_path)
-                else:
-                    print(f"::warning::scene {scene_num} has no completed image, using a plain fallback")
-                    run(["ffmpeg", "-y", "-f", "lavfi",
-                         "-i", f"color=c=gray20:s={WIDTH}x{HEIGHT}", "-frames:v", "1", image_path])
-
                 sub_lines = lines_by_scene.get(scene_num, [])
                 sub_text = " ".join(
                     l["text"] if l["speaker"] == "NARRATOR" else f'{l["speaker"].title()}: {l["text"]}'
@@ -356,7 +413,32 @@ def main():
                 )
 
                 segment_path = os.path.join(tmp, f"segment_{i:03d}.mp4")
-                build_segment(i, image_path, scene_audio_path, duration, sub_text, tmp, segment_path)
+
+                # 1) animated clip, if n8n gave us one for this scene
+                built = False
+                clip_url = clip_by_scene.get(int(scene_num))
+                if clip_url:
+                    try:
+                        clip_path = os.path.join(tmp, f"s{scene_num}_clip.mp4")
+                        download(clip_url, clip_path)
+                        build_clip_segment(i, clip_path, scene_audio_path, duration, sub_text, tmp, segment_path)
+                        built = True
+                        print(f"scene {scene_num}: built from the animated clip")
+                    except Exception as e:
+                        print(f"::warning::scene {scene_num}: clip could not be used ({e}) - using the still image")
+
+                # 2) still image with the slow zoom (also the fallback)
+                if not built:
+                    image_path = os.path.join(tmp, f"s{scene_num}.png")
+                    image_url = image_by_scene.get(scene_num)
+                    if image_url:
+                        download(image_url, image_path)
+                    else:
+                        print(f"::warning::scene {scene_num} has no completed image, using a plain fallback")
+                        run(["ffmpeg", "-y", "-f", "lavfi",
+                             "-i", f"color=c=gray20:s={WIDTH}x{HEIGHT}", "-frames:v", "1", image_path])
+                    build_segment(i, image_path, scene_audio_path, duration, sub_text, tmp, segment_path)
+
                 segment_paths.append(segment_path)
 
             final_list = os.path.join(tmp, "final_list.txt")
