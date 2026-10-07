@@ -453,7 +453,10 @@ def main():
             master_audio_and_music(joined_path, final_path)
 
             storage_path = f"videos/{episode_id}.mp4"
+            size_mb = os.path.getsize(final_path) / 1e6
+            print(f"uploading the finished video: {size_mb:.0f} MB")
             with open(final_path, "rb") as f:
+                # streamed from disk (not loaded into memory) and given up to 30 minutes: a long film is a big file
                 r = requests.post(
                     f"{SUPABASE_URL}/storage/v1/object/{BUCKET}/{storage_path}",
                     headers={
@@ -462,10 +465,15 @@ def main():
                         "Content-Type": "video/mp4",
                         "x-upsert": "true",
                     },
-                    data=f.read(),
-                    timeout=300,
+                    data=f,
+                    timeout=(30, 1800),
                 )
-                r.raise_for_status()
+            if r.status_code == 413 or "maximum allowed size" in r.text:
+                raise RuntimeError(
+                    f"Supabase refused the finished video ({size_mb:.0f} MB): it is bigger than the storage file-size limit "
+                    "(the Free plan allows 50 MB). Raise the limit in Supabase > Storage > Settings (needs the Pro plan), then send /resume."
+                )
+            r.raise_for_status()
 
             public_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{storage_path}"
 
