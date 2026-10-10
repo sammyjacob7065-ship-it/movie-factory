@@ -32,7 +32,8 @@ SUPABASE_URL = "https://njijwtcamdsorymzanpj.supabase.co".rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]  # from GitHub secret
 
 BUCKET = "betrayer-assets"
-WIDTH, HEIGHT = 1080, 1920
+WIDTH, HEIGHT = 1080, 1920   # default portrait; a manifest with aspect "16:9" switches the whole film to 1920x1080 (set in main)
+SUBTITLES = True             # a manifest with subtitles:false removes the burned-in subtitles
 FPS = 30
 
 # ---------------- POLISH SETTINGS (edit here) ----------------
@@ -177,6 +178,8 @@ def split_subtitle_chunks(text):
 
 def subtitle_filters(text, duration, tmp, tag):
     """Return a list of drawtext filters, each shown only during its time slot."""
+    if not SUBTITLES:
+        return []
     chunks = split_subtitle_chunks(text)
     if not chunks:
         return []
@@ -332,6 +335,12 @@ def master_audio_and_music(final_path, out_path):
 
 def main():
     manifest = json.loads(os.environ["MANIFEST_JSON"])
+    global WIDTH, HEIGHT, SUBTITLES
+    _asp = str(manifest.get("aspect") or "").strip()
+    if _asp in ("16:9", "4:3", "1:1"):
+        WIDTH, HEIGHT = {"16:9": (1920, 1080), "4:3": (1440, 1080), "1:1": (1080, 1080)}[_asp]
+    SUBTITLES = manifest.get("subtitles", True) is not False
+    print(f"Output {WIDTH}x{HEIGHT}, subtitles {'on' if SUBTITLES else 'off'}")
     episode_id = manifest["episodeId"]
 
     # animated clips offered by n8n: {scene_number: clip_url}
