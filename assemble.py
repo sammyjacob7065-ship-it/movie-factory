@@ -4,7 +4,7 @@ assemble.py - Betrayer episode assembler (polished version).
 
 Polish added on top of the original pipeline:
   - images are fitted to the 9:16 frame on a blurred background (no stretching)
-  - smooth eased zoom/pan, changing style scene by scene
+  - smooth eased zoom/pan, six different camera moves in rotation scene by scene
   - timed subtitles in short chunks (not one giant block)
   - soft fades between scenes
   - consistent audio format per scene (no glitches on join)
@@ -141,24 +141,26 @@ def build_composite(image_path, out_path):
 
 
 def zoom_expressions(scene_index, total_frames):
-    """Different slow camera move for each scene: in, out, drift. Eased start/end."""
+    """A different slow camera move for each scene (six moves in rotation). Eased start and end."""
     n = max(total_frames, 1)
     p = f"(on/{n})"
     ease = f"({p}*{p}*(3-2*{p}))"
-    mode = scene_index % 3
+    mode = scene_index % 6
     a = ZOOM_AMOUNT
+    cx = "iw/2-(iw/zoom/2)"
+    cy = "ih/2-(ih/zoom/2)"
     if mode == 0:      # slow push in, centred
-        z = f"1+{a}*{ease}"
-        x = "iw/2-(iw/zoom/2)"
-        y = "ih/2-(ih/zoom/2)"
+        z, x, y = f"1+{a}*{ease}", cx, cy
     elif mode == 1:    # slow pull out, centred
-        z = f"1+{a}-{a}*{ease}"
-        x = "iw/2-(iw/zoom/2)"
-        y = "ih/2-(ih/zoom/2)"
-    else:              # push in while drifting upward
-        z = f"1+{a}*{ease}"
-        x = "iw/2-(iw/zoom/2)"
-        y = f"(ih-ih/zoom)*(0.65-0.45*{ease})"
+        z, x, y = f"1+{a}-{a}*{ease}", cx, cy
+    elif mode == 2:    # push in while drifting upward
+        z, x, y = f"1+{a}*{ease}", cx, f"(ih-ih/zoom)*(0.65-0.45*{ease})"
+    elif mode == 3:    # pan left to right
+        z, x, y = f"1+{a}", f"(iw-iw/zoom)*{ease}", cy
+    elif mode == 4:    # pan right to left
+        z, x, y = f"1+{a}", f"(iw-iw/zoom)*(1-{ease})", cy
+    else:              # pull out while drifting downward
+        z, x, y = f"1+{a}-{a}*{ease}", cx, f"(ih-ih/zoom)*(0.30+0.45*{ease})"
     return z, x, y
 
 
@@ -612,10 +614,17 @@ def make_thumbnail(image_path, title, out_path, tmp):
 
 def main():
     manifest = json.loads(os.environ["MANIFEST_JSON"])
-    global WIDTH, HEIGHT, SUBTITLES
+    global WIDTH, HEIGHT, SUBTITLES, SUB_WRAP_CHARS, SUB_CHUNK_CHARS, SUB_BOTTOM_MARGIN, SUB_FONT_SIZE
     _asp = str(manifest.get("aspect") or "").strip()
     if _asp in ("16:9", "4:3", "1:1"):
         WIDTH, HEIGHT = {"16:9": (1920, 1080), "4:3": (1440, 1080), "1:1": (1080, 1080)}[_asp]
+        # subtitles for wide pictures: longer lines, lower on the screen (the defaults above are made for tall phone video)
+        if _asp == "16:9":
+            SUB_WRAP_CHARS, SUB_CHUNK_CHARS, SUB_BOTTOM_MARGIN, SUB_FONT_SIZE = 46, 92, 90, 46
+        elif _asp == "4:3":
+            SUB_WRAP_CHARS, SUB_CHUNK_CHARS, SUB_BOTTOM_MARGIN, SUB_FONT_SIZE = 38, 76, 100, 46
+        else:
+            SUB_WRAP_CHARS, SUB_CHUNK_CHARS, SUB_BOTTOM_MARGIN, SUB_FONT_SIZE = 32, 64, 140, 46
     SUBTITLES = manifest.get("subtitles", True) is not False
     print(f"Output {WIDTH}x{HEIGHT}, subtitles {'on' if SUBTITLES else 'off'}")
     episode_id = manifest["episodeId"]
