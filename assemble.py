@@ -49,6 +49,14 @@ MUSIC_VOLUME = 0.25         # before ducking; it dips automatically under the vo
 VIDEO_CRF = 23              # lower = better quality, bigger file
 VIDEO_MAXRATE = "3M"        # caps file size
 CLIP_FILL_MODE = "loop"     # clip shorter than the narration: "loop" it, or "hold" its last frame
+
+# ---- YOUTUBE THUMBNAIL (edit here) ----
+THUMB_ENABLED = True        # make a 1280x720 cover picture with the film title and upload it next to the video
+THUMB_TAG = "NEW FILM"      # small label in the top-left corner ("" = none)
+THUMB_ACCENT = "FFD400"     # colour of the label text and frame (hex, no #)
+THUMB_COLOR_TOP = "FFE45A"  # title fill: top colour of the gold gradient (hex, no #)
+THUMB_COLOR_BOTTOM = "F07A0A"  # title fill: bottom colour of the gradient (hex, no #)
+THUMB_SQUEEZE = 0.80        # 1.0 = normal width letters, 0.8 = taller, narrower poster letters
 # --------------------------------------------------------------
 
 FONT_CANDIDATES = [
@@ -333,6 +341,275 @@ def master_audio_and_music(final_path, out_path):
 
 # ---------------------------------------------------------------- main
 
+# ---------------------------------------------------------------- YouTube thumbnail
+
+def pick_thumbnail_scene(scenes, image_by_scene, manifest):
+    """The most dramatic picture that does not give the ending away: an explicit manifest choice wins,
+    otherwise the scene with the most characters + the strongest emotion; the last scene is skipped (spoilers)."""
+    try:
+        forced = int(manifest.get("thumbnail_scene") or 0)
+        if forced and image_by_scene.get(forced):
+            return forced
+    except (TypeError, ValueError):
+        pass
+    cands = [s for s in scenes if image_by_scene.get(s.get("scene_number"))]
+    if len(cands) > 3:
+        cands = cands[:-1]
+    if not cands:
+        return None
+
+    def score(s):
+        chars = s.get("scene_characters") or s.get("speakers") or []
+        try:
+            inten = float(s.get("intensity_score") or 0)
+        except (TypeError, ValueError):
+            inten = 0.0
+        return (len(set(chars)) * 2 + inten, -int(s.get("scene_number") or 0))
+    return max(cands, key=score).get("scene_number")
+
+
+# Heavy title font (Inter Display Black, SIL Open Font License) cut down to capitals, digits and punctuation, so the
+# cover never depends on fonts installed on the build machine.
+_TITLE_FONT_B64 = (
+    "T1RUTwAMAIAAAwBAQ0ZGIFUm8ZcAAAJ4AAAUlEdERUYALwA7AAAXDAAAABxHUE9THc0RfAAAFygAAAe8R1NVQrj6uPQAAB7kAAAA"
+    "Kk9TLzJyHXgqAAABMAAAAGBjbWFwAfwCcwAAAeQAAAByaGVhZC/aYGYAAADMAAAANmhoZWEQDwZxAAABBAAAACRobXR44jAKuwAA"
+    "HxAAAAC4bWF4cAAuUAAAAAEoAAAABm5hbWUE/A1iAAABkAAAAFJwb3N0/6sBBAAAAlgAAAAgAAEAAAAEAACCpGBUXw889QADCAAA"
+    "AAAA4YBTjQAAAADm88JBAAD+YAhMB0AAAAADAAIAAAAAAAAAAQAAB8D+EgAACEwAAP/kCEwAAQAAAAAAAAAAAAAAAAAAAC4AAFAA"
+    "AC4AAAAEBU8DhAAFAAAFMwTNAAAAmgUzBM0AAALNAQQCegAAAgAKAwAAAAIABAAAAAEAAAAAAAAAAAAAAABSU01TAMAAIABaB8D+"
+    "EgAAB8AB7gAAAAEAAAAABCAF0gAAACAACAAAAAIAHgADAAEECQABACYAAAADAAEECQACAA4AJgBJAG4AdABlAHIAIABEAGkAcwBw"
+    "AGwAYQB5ACAAQgBsAGEAYwBrAFIAZQBnAHUAbABhAHIAAAAAAAIAAAADAAAAFAADAAEAAAAUAAQAXgAAABAAEAADAAAAIQAnAC4A"
+    "OQA6AD8AWv//AAAAIAAmACwAMAA6AD8AQf//AAAAAAAA/+v/8v/o/8AAAQAQABIAFAAAAAAAAAAAAAAALQAmACUAKQAqACgAKwAA"
+    "AAMAAAAAAAD/qAEEAAAAAAAAAAAAAAAAAAAAAAAAAAABAAQCAAEBARNJbnRlckRpc3BsYXktQmxhY2sAAQEBPfgbAPgcAfgdDAD4"
+    "HgL4HwMzDAP3mAwEHkiCjI+Lix5IgoyPi4sMB4v8NBwITBwHQAX3cA+rHBR0EveSEQAFAQEELlZpdjQuMEludGVyIFVJIGFuZCBJ"
+    "bnRlciBpcyBhIHRyYWRlbWFyayBvZiByc21zLkNvcHlyaWdodCAyMDE2IFRoZSBJbnRlciBQcm9qZWN0IEF1dGhvcnNJbnRlciBE"
+    "aXNwbGF5IEJsYWNrSW50ZXIgRGlzcGxheQAAAQAiGQARCQAHAAACAAAgAAAOAABoAAANAAAPAAAbAAABAAAuAgABAcICFAKmAxUD"
+    "bgOxA+kEdQS6BNsFLQV2BZ0GHQZ8Bu8HTAfrCFUI/wkyCYkJzApNCq4K8ws7C6kL2wxKDRANYg3vDpsOyw+QEDoRExFqEhgSNhJU"
+    "EnESrBMTExa6/DT3NMv3FMvLy/cUy/cUy8v3FMvLy8vrS8vLy8vrK/d0S8vL68v3NBL33PdM+0z3vPu898z7zPhM+1TLS/hM+9z3"
+    "3PvMy0v3zPtM90wT/7eJQPqM/DQVixwI4AX9RIsFixz3IAX3TPl0FffUiwWL+5QF+9SLBYv5FBXLiwWL+1QF91SLBYv3FAUTBgAI"
+    "gEuLBYtLBUuLBYv3FAUT6gSAQPdUiwWL+5QF+9SLBYv9FBX3bPcUBftsiwWLywX31IsFi0oF+2v7EwX3a4sFi0sF+9SLBYscBoAV"
+    "EwAEAID3VIsFEwAIAICL+zQFEwAqgED3FIsFi0sF+9SLBYv39BUTAAJAAPcEiwWL6wUTAAOAQPsEiwWLywX31IsFi0sFEwACAgD7"
+    "JIsFiysFEwCGgED3JIsFi0sF+9SLBYv8lBUTAIAgAPcUiwWL6wUTAKCAQPsUiwWLywX31IsFi0sFEwGAgID7FIsFi/s0BftUiwWL"
+    "SxUTA0CBQPeUiwWL9zQFy4sFi/t0BfvUiwUTEAAQAPeU/RQVi/cUBRMQAAQA+1SLBYv7FAUTAAgIAMv69BUTABAIAIvrBUuLBRMA"
+    "CAgAiysFDvegoHb3iffU+jF3AYscBh0Di4sV+FuLBdT3iQX4hosF0vuJBfhoiwX8jRwF0gX8xIsF9xD+MRWPmAXB90i990K890kI"
+    "u/tJvPtCv/tICI9+BQ6ti/fM97r3uveq98wS2/go9+74NPwM+D4T9NuLFflSiwX314v3U/dGi/eICIv3Zvsm9yT7VJIIi40FE/j3"
+    "Qaz3B/cTi/dBCIv3bftI9y/76IsI/RqLBfgoHPtmFYv3ugX3cIsFE/Twi8xRizIIizJKUSaLCPtw+OAVi/eqBfdXiwUT+OeLxlSL"
+    "NwiLN1BUL4sIDvdZc/f8+cb3/AGz+DgD+ZBzFfgRi/eh93y19/QI/DeLBXH7ICs3+yOLCPtfi/sB9yiL95gIi/eZ9wL3Kfdeiwj3"
+    "I4vsNqT7IQj4N4sFYvf0+6L3fvwRiwj8K4v70fuki/yGCIv8gvfR+6b4K4sIDvczi/fs+bb37AHb+DT4iPg4A/kqixX4X4v3u/e4"
+    "i/hYCIv4WfvA97n8YIsI/NSLBYsc+i4F+DT37BWL+bYF9xqLBfePi/cH+xWL+6UIi/uj+wP7FfuHiwgOiIv39Pdy9+j3dPf0Adv4"
+    "NAPbixUcBIKLBYv39AX9dosFi/dyBfk9iwWL9+gF/T2LBYv3dAX5dosFi/f0BRz7fosFDlGgdvis9+b3nPf0Adv4NAPbixX4NIsF"
+    "i/isBfkriwWL9+YF/SuLBYv3nAX5U4sFi/f0Bf7ziwUO929z9/z3W/e999b3/BKz+Dj32Pk4/Cr4KhP0+ZhzFfgxi/en95GL+BgI"
+    "i/drBRP4/TiLBYv7vQUT9PeiiwWH+wwtPPs9iwj7a4v7BPcji/edCIv3nfcC9yX3Z4sI9yOL20ig+wMI+DyLBXD32Pu792r7/4sI"
+    "/CuL+9H7pIv8hgiL/Gv3tPu9+FCLCA73U6B2+Nn39PjBdwHb+DT4hPg0A9uLFfg0iwWL+NkF+ISLBYv82QX4NIsFixwF0gX8NIsF"
+    "i/zBBfyEiwWL+MEF/DSLBQ79ZaB2HAXSdwHb+DQD+IQcBdIV/DSLBYsc+i4F+DSLBQ4pc/fsHASSdwG4+BT3pvg0A/jRcxX384v3"
+    "V/dCi/fMCIv6mAX8NIsFi/6QBYsrWlUziwgzi1rBi+sIi/cOBfwUiwWL+woFi/vU91H7RvfniwgO91igdhwF0ncB2/g0A9uLFfg0"
+    "iwWL9+4F90n3cgX36PzMBfhwiwX8uPnmBfic+RQF/HWLBfu8/BMFSzhLOUs4CIv5CwX8NIsFDvsLi/f0HARydwHb+DQD24sV+raL"
+    "BYv39AX9FosFixwEcgX8NIsFDvjpoHYcBdJ3Adv4LPoq+CwD24sV+CyLBYv41AWL64P3U4b3TAi7+0q9+1CqJgj3RPzUBffkiwX3"
+    "QfjUBar0v/dZuvdPCIf7UYL7XIsnCIv81AX4LIsFixwF0gX9A4sF+xj8ZgVuJl/7QWX7LQhl9y1e90Fu8Aj7GvhmBf0CiwUO92ug"
+    "dhwF0ncB2/g0+Jz4NAPbixX4NIsFi/i0BYvHi/cJhvcaCNH7Fc37B7VICPfn/LQF+DyLBYscBdIF/DSLBYv8tgWLRIz7DY/7DQhR"
+    "9k73A2jDCPv/+N0F/DyLBQ73e3P3/PnG9/wBs/g4+PT4OAP5kHMV+CmL99P3o4v4hQiL+Ib70/ek/CmLCPwri/vR+6SL/IYIi/yC"
+    "99H7pvgriwiL9/wV+1eL+wH3K4v3lQiL95b3Afcs91eLCPdYi/cA+yyL+5YIi/uV+wD7K/tYiwgOqaB2+Fb36vf49+oB2/g0+Br4"
+    "KgPbixX4NIsFi/hWBfdtiwX3+Iv3c/ddi/fTCIv30/tz9137+IsI/Q2LBfg0/U4Vi/f4BfdOiwX3EYvaRov7AQiL+wE8RvsRiwgO"
+    "93tz9/z7/PjU+O73/BKz+Dj49Pg4E7j5kHMV6Yvkmt2nCPb7FQX38osF+3f3ngX3IvcV4vdbi/eYCIv4hvvT96T8KYsI/CuL+9H7"
+    "pIv8hgiL/IL30fum+CuLCBN4+zD41BUTuPc4+2wFiIuJi4iLCPtXi/sB9yuL95UIi/eW9wH3LPdXiwj3WIv3APssi/uWCBN4i/sN"
+    "cypeRgg+6gUOzaB2+Gb31vgA9+YB2/g0+Br4KgPbixX4NIsFi/hmBfdOiwX3c/xmBfhFiwX7pfjABfcl4d33I4v3TQiL99P7c/dd"
+    "+/iLCP0NiwX4NP1SFYv4AAX3TosF9xGL2kKL+wEIi/sBPEL7EYsIDvVz99z73Pic+J74hPvc99wS5/g2+Db4LxOc+VRzFfgoi/d7"
+    "90aL98wIi/eC+yX3GPvqygj7DKEF+y+nSLGL0giL1t3A9wmLCBOs9xCL3kuVIwj4EosFE5yB98z7dfdM/AiLCPv+i/uL+1WL+68I"
+    "i/tx9zD7Lfe0VAj3KG8F9zxr12GLQwiLPTNW+xeLCPsriyzShfcNCBNc/B2LBROci/vj93f7TfgxiwgOuqB2HARy9/QB+GT4NAOz"
+    "HARyFfg8iwWLHPuOBfg0iwWLHARyBfg8iwWL9/QFHPsQiwUO9ydz9/IcBIx3Adv4KPhw+CgD+WZzFfgZi/eR926L9+QIi/pUBfwo"
+    "iwWL/jIFi/sfKSj7IIsI+x6LJ++L9x4Ii/oyBfwoiwWL/lQFi/vl95D7bfgaiwgO94OgdhwF0ncBixwGAAP4iIsV+LyLBfh4HAXS"
+    "BfxYiwX7OfzWBVn7Ql37QV77Qghc90Jb90FX90II+0H41gX8XosFDvnPoHYcBdJ3AYscCEwD+B+LFfhdiwX3PflEBZi/l8qb2Qib"
+    "PZdMmFcI9z39RAX4XYsF+B8cBdIF/FiLBfsM/NYFcPsWc/sWdPsWCHH3FnH3Fm33Fgj7GPjWBfwoiwX7GPzWBW37F3D7F3L7Fwhz"
+    "9xdz9xdw9xcI+wv41gX8WIsFDvdxoHYcBdJ3AYscBe4Di4sV+GqLBfc/95QFtMixyLHICLFOsU6yTgj3NvuUBfh3iwX8ovmZBfho"
+    "+WEF/F2LBfsN+1YFYkpkSWVKCGXMZc1jzAj7C/dWBfxpiwX4cf1sBQ73W6B2HAXSdwH4v/gmA/i/ixX4JosFi/iQBfiv+moF/G2L"
+    "Bftd/DYFdVx1XHdbCHW7dbpzugj7avg2BfxwiwX4v/5qBQ6yi/f0+ab39AG9HATUA72LFRwE1IsFi/f0Bf1biwXAxr/FvcYI+Lr5"
+    "HgWL98wFHPtAiwWL+/QF+VOLBVRPVlBXTwj8wf0bBQ7uc/fU+hb31AGz+Bz4qPgcA/lOcxX4MYv3ife3i/hxCIv4cvuJ97j8MYsI"
+    "/DGL+4n7uYv8cQiL/HD3ifu4+DGLCIv31BX7OYsm9z6L96oIi/er8Pc/9zmLCPc5i/D7P4v7qwiL+6om+z77OYsIDvxXoHYcBdJ3"
+    "AfgC+CQD+ZIcBdIV/ASLBfwC+3QFi/vsBffg918FjYsFi/75BfgkiwUOhYv31vn899QBx/gR+Bj4FgPWixUcBHiLBYv31gX82IsF"
+    "i40F94X3WAX3Wvc19x33G4v3cwiL97z7hPdH+96LCPv9i/t0+2uL++8I+BGLBYv3L93i9w2LCPcDi9VDiyEIi/sV+wM9OEgI/MT8"
+    "WAUOlHP3yvvK+Kzz96z3HPh2+8D3wBK9+Br7/vgY+An4EfwC+DATrID5InMV+AGL94v3UYv3kwiL90b7DPcy+3SiCIuOBROtAPc9"
+    "n/cV9wiL90oIi/eH+3z3P/veiwgTsoD8AIv7bPtli/ulCPgYiwUTqwCL9t3W9wKLCPSL10aLLAiLKjxS+xqLCPskiwWL+6wF9ySL"
+    "BROsgPcfi+RKiycIiyo4R/sLiwj7GIs74Iv3IQgTbID8GosFE6yAi/uq90b7lvg+iwgO9wmgdve098b6FHcB+az4GgPL97QV+WyL"
+    "BYv7tAX4GosFi/e0Bfc6iwWL98YF+zqLBYv6FAX8k4sF/PP+DAX5bIMV+/WLBYuNBff0+J4FjIsFDmtz98b7xviM94j3ufcp99gS"
+    "rvgV+DP4GhO8+QdzFff+i/eA93SL98wIi/ev+473cvudiwj7Aosua05PCImLBZ73hQX5MosFi/fYBf6eiwVh/g4F+AiLBaLV1r3y"
+    "iwj3DIvgLov7FwiL+xY4M/sOiwj7DIsx34v3BggTfPwViwUTvJ/7zvd4+1L37IsIDqRz98z4OPe4w/he+8T3xBKz+A78DvhI+DL4"
+    "HBPa+UJzFffwi/eM92aL98wIi/e3+3D3Z/vEiwj7KYv7A1k9+wQIiYsFi/d72/ch90OLCBPq9wWL2E+cLQj4EosFE9py95P7cPdf"
+    "+92LCPwqi/uG+8SL/HYIi/xu94P7qvgriwiH98wVE9b7C4s044v3DgiL9w7i4/cLiwj3DYviM4v7DggT2ov7DjQz+w2LCA77A6B2"
+    "HASA9+YBs/rmA/ciixX4NIsF+OAcBI4Fi/fYBf7miwWL++YF+UKLBYuJBQ6cc/eq9/73t/fS97USs/g4/Ar4IPfy+CD8Cvg4E/L5"
+    "JHMV+AmL94n3Pov3lgiL92D7KfcX+4WsCBPs92ur9xX3CIv3TgiL9437c/cz+/GLCPvpi/t5+ziL+4gIi/tO9xb7CfdqbAgT8vuF"
+    "avsp+xeL+2AIi/uW94j7PvgIiwiL96oV+waLOdeL9QiL9N3W9waLCPcHi95AiyIIiyI3PvsGiwgT7Iv5IRUhi0fJi+wIi+zPyfWL"
+    "CPaL0E2LKgiLKkZNIIsIDqRz98T7xPhew/e4+Dj3zBKz+Bz4MvhI/A74DhO6+Q5zFfgqi/eG98SL+HYIi/hu+4P3qvwriwj78Iv7"
+    "jPtmi/vMCIv7t/dw+2f3xIsI9ymL9wO92fcECI2LBYv7ezv7IftDiwgTevsFiz7HeukI/BKLBRO6pPuT93D7X/fdiwgTvJH5uhX7"
+    "DYs044v3DgiL9w7i4/cNiwj3C4viM4v7DgiL+w40M/sLiwgO6nP3zvuhdhwErPfQErn4FPuK99r3bve8f/fSE7T4xnMV9w6L9x+s"
+    "9wnUCBNy2TkF+CaLBfuA95gF8vcetvdMi/dWCPvSiwWLLHI1YUII+1L3ZgXSvQUTbPcU5tH3D4v3HgiL92P7Lvc/+46LCPuai/tC"
+    "+02L+3cIi/sVw/sFzDMIiIkFE3T7MikpIIv7OwgTtIv7e/dX+1H31YsI9zH36RVgeWCCYIsIKotMvYvfCIvGqbCyqQgTbNj4GBVh"
+    "xHO9i7wIi8m1s8+LCNSLrmCLXAiLZndaR2EIDv19ePg0/B92HAXldxLP+DT8JfgWE2jx+GwV9/CLBbH6jgX8PIsFE3D3aBz6GxX3"
+    "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"
+    "AAAAAAAAAAD/uwAAAAAAAAAA/4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP+mAAAAAP+7/0YAAAAAAAAAAAAAAAAA"
+    "AAAAAAD/vv8Y/9j+wwAA/xD/pv/sAAAAAAAAAAAAAAAAAAAAAAAAAAD/zgAAAAAAAAAA/+wAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAP9GAAAAAAAAAAAAAAAAAAAAAAAAAAD/r/91AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/14AAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AP87/q8AAAAAAAAAAP+AAAAAAAAAAAAAAAAAAAD/gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AAAAAP+wAAAAAP+7AAAAAP+c/5IAAAAAAAD/vgAAAAAAAAAAAAAAAAAA/9gAAAAAAAAAAAAA/+wAAAAAAAAAAAAAAAAAAAAAAAAA"
+    "AP+7AAAAAAAAAAAAAAAA/37/iAAAAAAAAAAAAAD/IwAAAAAAAAAAAAAAAAAAAAD/uwAA/wD/O//gAAD/3gAA/4kAAAAo/+MAAAAA"
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/4AAAAAAAAAAAAAIAAwABAB8AAAAiACQAHwAnACwAIgABAAEA"
+    "LAACAAgADAABAAMAFwAOAAAAAAAEAAsADwAAAAAAAQARAAEACgAJAAYABAATABIADQAFABAAGgAAAB0AFgAbAAAAAAAcABYAGgAA"
+    "AAAAGQAHABgAFQAVABQAAQABACwAAwABAAIAAQABAAEAAgABAAEADwABAAEAAQABAAIAAQACAAEACAAFAAQACgANAAkABgALABAA"
+    "FQAYABIAFAAAABAAFgAXAAAAAAAAABMABwARAA4ADgAMAAEAAAAKACYAKAACREZMVAAObGF0bgAYAAQAAAAA//8AAAAAAAAAAAAA"
+    "AAAFQAFIBh0AAAUzAFAF1gAoBbAAUAUOAFAE1wBQBewAKAXQAFACQABQBK8ALQXVAFAEmgBQB2YAUAXoAFAF+AAoBS8AUAX4ACgF"
+    "UwBQBXsAQAVAACgFpABQBgAAAAhMAAAF7gAABdgAAAU4ADIFdAAoA04AIAULADwFGgAyBYYAQATxACMFKgAoBKIAKAUiACgFKgAo"
+    "BXAALgIoAEAE1gBAA6wAeQJKAHQCIAAoAiAAQAIgAEABeAAA"
+)
+_TITLE_FONT_UPM = 2048
+_TITLE_FONT_ADV = {" ":376,"!":552,"&":1392,"'":586,",":544,"-":940,".":544,"0":1396,"1":846,"2":1291,"3":1306,"4":1414,"5":1265,"6":1322,"7":1186,"8":1314,"9":1322,":":544,"?":1238,"A":1565,"B":1331,"C":1494,"D":1456,"E":1294,"F":1239,"G":1516,"H":1488,"I":576,"J":1199,"K":1493,"L":1178,"M":1894,"N":1512,"O":1528,"P":1327,"Q":1528,"R":1363,"S":1403,"T":1344,"U":1444,"V":1536,"W":2124,"X":1518,"Y":1496,"Z":1336}
+
+
+def _title_font_file(tmp):
+    """Write the embedded font to disk; fall back to a system font if that ever fails."""
+    try:
+        import base64
+        p = os.path.join(tmp, "title_font.otf")
+        with open(p, "wb") as f:
+            f.write(base64.b64decode(_TITLE_FONT_B64))
+        return p, True
+    except Exception:
+        return find_font(), False
+
+
+def _text_width(text, size, embedded):
+    if embedded:
+        return sum(_TITLE_FONT_ADV.get(ch, 1100) for ch in text) * size / _TITLE_FONT_UPM
+    return len(text) * size * 0.66
+
+
+def wrap_title(title):
+    """Short, punchy capital lines (max 3), like a real YouTube cover."""
+    t = re.sub(r"\s+", " ", str(title or "").replace("’", "'")).strip().upper()
+    t = re.sub(r"[^A-Z0-9'!?&.,:\- ]", "", t) or "NEW FILM"
+    n = 1 if len(t) <= 16 else (2 if len(t) <= 34 else 3)
+    lines = textwrap.wrap(t, width=max(8, -(-len(t) // n)), break_long_words=False) or [t]
+    while len(lines) > 3:           # very long titles: merge the shortest neighbours
+        i = min(range(len(lines) - 1), key=lambda k: len(lines[k]) + len(lines[k + 1]))
+        lines[i:i + 2] = [lines[i] + " " + lines[i + 1]]
+    return lines
+
+
+def _hex_rgb(h, default):
+    h = re.sub(r"[^0-9A-Fa-f]", "", str(h or ""))
+    if len(h) != 6:
+        h = default
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def make_thumbnail(image_path, title, out_path, tmp):
+    """1280x720 JPEG in the style of a movie poster on YouTube: the scene picture full-frame and bright, a dark fade at the
+    bottom, and the title in huge gold capitals with a thick black outline and shadow across the bottom."""
+    W, H = 1280, 720
+    font, embedded = _title_font_file(tmp)
+    lines = wrap_title(title)
+    sq = THUMB_SQUEEZE if embedded else 0.9
+    max_w = W - 120                                   # the title may use the width minus side margins
+    size = {1: 215, 2: 175, 3: 130}[len(lines)]
+    for _ in range(60):                               # shrink until the widest line fits
+        if max(_text_width(l, size, embedded) for l in lines) * sq <= max_w or size <= 60:
+            break
+        size -= 4
+    pad = max(10, size // 7)                          # room for the outline around the letters
+    line_h = int(size * 1.02)
+    ch = line_h + 2 * pad
+    ch -= ch % 2                                      # height of one line's canvas (even number)
+    gap = int(line_h * 0.86)                          # distance between line tops (tight, like a poster)
+    block_h = ch + gap * (len(lines) - 1)
+    y_first = H - 34 - block_h
+    top = _hex_rgb(THUMB_COLOR_TOP, "FFE45A")
+    bot = _hex_rgb(THUMB_COLOR_BOTTOM, "F07A0A")
+    bw = max(7, size // 11)                           # outline thickness
+
+    graph = [
+        f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H}:(iw-{W})/2:(ih-{H})*0.18,"
+        "eq=contrast=1.10:saturation=1.22:brightness=0.01,unsharp=5:5:0.6:5:5:0.0,vignette=angle=PI/6[bg]",
+        # dark fade from the middle of the picture to the bottom, so the title reads on any scene
+        f"color=c=black:s={W}x{H},format=yuva420p,geq=lum='0':cb='128':cr='128':"
+        f"a='clip(235*pow(clip((Y/{H}-0.40)/0.60,0,1),1.5),0,255)'[fade]",
+        "[bg][fade]overlay=format=auto[b0]",
+    ]
+    cur = "b0"
+    fontopt = f"fontfile={font}:" if font else ""
+
+    if THUMB_TAG:
+        tagf = os.path.join(tmp, "thumb_tag.txt")
+        with open(tagf, "w") as f:
+            f.write(THUMB_TAG.upper())
+        tsize = 34
+        tag_w = int(_text_width(THUMB_TAG.upper(), tsize, embedded) + 44)
+        graph.append(f"[{cur}]drawbox=x=36:y=32:w={tag_w}:h=62:color=black@0.78:t=fill[g1]")
+        graph.append(f"[g1]drawbox=x=36:y=32:w={tag_w}:h=62:color=0x{THUMB_ACCENT}@0.95:t=3[g2]")
+        graph.append(
+            f"[g2]drawtext={fontopt}textfile={tagf}:fontsize={tsize}:fontcolor=0x{THUMB_ACCENT}:"
+            f"x=36+(({tag_w}-text_w)/2):y=32+((62-text_h)/2)[g3]"
+        )
+        cur = "g3"
+
+    for k, line in enumerate(lines):
+        lf = os.path.join(tmp, f"thumb_l{k}.txt")
+        with open(lf, "w") as f:
+            f.write(line)
+        tw = int(_text_width(line, size, embedded)) + 2 * pad + 8
+        tw -= tw % 2
+        sw = max(2, int(tw * sq))                     # width after the poster-style squeeze
+        sw -= sw % 2
+        y_pos = y_first + k * gap
+        common = f"fontsize={size}:fontcolor=white:y=(h-text_h)/2:x=(w-text_w)/2"
+        graph += [
+            # white-on-black masks: letters only, and letters + outline
+            f"color=c=black:s={tw}x{ch},drawtext={fontopt}textfile={lf}:{common},format=gray,scale={sw}:{ch},lutyuv=y='clip((val-16)*1.1644,0,255)'[mf{k}]",
+            f"color=c=black:s={tw}x{ch},drawtext={fontopt}textfile={lf}:{common}:borderw={bw}:bordercolor=white,"
+            f"format=gray,scale={sw}:{ch},lutyuv=y='clip((val-16)*1.1644,0,255)'[mo{k}]",
+            # gold gradient (top -> bottom of the letters), cut out by the letter mask
+            f"color=c=black:s={sw}x{ch},format=gbrp,geq="
+            f"r='{top[0]}+({bot[0]}-{top[0]})*clip((Y-{pad})/{line_h},0,1)':"
+            f"g='{top[1]}+({bot[1]}-{top[1]})*clip((Y-{pad})/{line_h},0,1)':"
+            f"b='{top[2]}+({bot[2]}-{top[2]})*clip((Y-{pad})/{line_h},0,1)',format=rgba[gr{k}]",
+            f"[gr{k}][mf{k}]alphamerge[fill{k}]",
+            # black outline layer, plus a soft shadow copy pushed down and to the right
+            f"color=c=black:s={sw}x{ch},format=rgba[bk{k}]",
+            f"[bk{k}][mo{k}]alphamerge,split=2[ol{k}][sh0{k}]",
+            f"[sh0{k}]boxblur=7:2,colorchannelmixer=aa=0.75[sh{k}]",
+            f"[{cur}][sh{k}]overlay=x=(W-w)/2+9:y={y_pos}+11:format=auto[s{k}]",
+            f"[s{k}][ol{k}]overlay=x=(W-w)/2:y={y_pos}:format=auto[o{k}]",
+            f"[o{k}][fill{k}]overlay=x=(W-w)/2:y={y_pos}:format=auto[d{k}]",
+        ]
+        cur = f"d{k}"
+
+    for q in (2, 5, 9):             # YouTube allows up to 2 MB: lower the quality until it fits
+        run(["ffmpeg", "-y", "-i", image_path, "-filter_complex", ";".join(graph), "-map", f"[{cur}]",
+             "-frames:v", "1", "-update", "1", "-q:v", str(q), out_path])
+        if os.path.getsize(out_path) < 1_900_000:
+            break
+    return out_path
+
+
 def main():
     manifest = json.loads(os.environ["MANIFEST_JSON"])
     global WIDTH, HEIGHT, SUBTITLES
@@ -485,6 +762,25 @@ def main():
             r.raise_for_status()
 
             public_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{storage_path}"
+
+            # YouTube cover picture (never able to fail the film: if anything goes wrong n8n falls back to scene 1)
+            if THUMB_ENABLED:
+                try:
+                    tscene = pick_thumbnail_scene(scenes, image_by_scene, manifest)
+                    if tscene:
+                        timg = os.path.join(tmp, "thumb_src.png")
+                        download(image_by_scene[tscene], timg)
+                        tout = os.path.join(tmp, "thumbnail.jpg")
+                        make_thumbnail(timg, manifest.get("title") or ep.get("title") or "", tout, tmp)
+                        with open(tout, "rb") as tf:
+                            tr = requests.post(
+                                f"{SUPABASE_URL}/storage/v1/object/{BUCKET}/thumbnails/{episode_id}.jpg",
+                                headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
+                                         "Content-Type": "image/jpeg", "x-upsert": "true"},
+                                data=tf, timeout=(30, 120))
+                        print(f"thumbnail from scene {tscene}: upload status {tr.status_code}")
+                except Exception as e:
+                    print(f"::warning::thumbnail could not be made ({e}) - YouTube will use scene 1")
 
             updated = sb_patch(
                 f"episodes?id=eq.{episode_id}&status=in.(assembly_running,assemblycomplete,failed)",
