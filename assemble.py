@@ -32,7 +32,7 @@ SUPABASE_URL = "https://njijwtcamdsorymzanpj.supabase.co".rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]  # from GitHub secret
 
 BUCKET = "betrayer-assets"
-WIDTH, HEIGHT = 1080, 1920   # default portrait; a manifest with aspect "16:9" switches the whole film to 1920x1080 (set in main)
+WIDTH, HEIGHT = 1920, 1080   # default is now horizontal 16:9; a manifest with aspect "9:16" switches the whole film to vertical 1080x1920 (set in main)
 SUBTITLES = True             # a manifest with subtitles:false removes the burned-in subtitles
 FPS = 30
 
@@ -41,10 +41,10 @@ ZOOM_AMOUNT = 0.06          # how far the slow zoom goes (0.06 = 6%; was 12% and
 HEAD_SAFE = 0.28            # 0.5 = zoom into the centre; smaller keeps the TOP of the picture (heads) and crops the bottom more
 FADE_SECONDS = 0.30         # fade in/out at the start/end of each scene
 SCENE_TAIL_SECONDS = 0.4    # pause after each scene's narration
-SUB_FONT_SIZE = 52
-SUB_WRAP_CHARS = 26         # characters per subtitle line
-SUB_CHUNK_CHARS = 52        # characters per subtitle screen (about 2 lines)
-SUB_BOTTOM_MARGIN = 300     # pixels from the bottom (keeps clear of app buttons)
+SUB_FONT_SIZE = 46
+SUB_WRAP_CHARS = 46         # characters per subtitle line (horizontal film)
+SUB_CHUNK_CHARS = 92        # characters per subtitle screen (about 2 lines)
+SUB_BOTTOM_MARGIN = 90      # pixels from the bottom
 MUSIC_PATH = "assets/music/default.mp3"
 MUSIC_VOLUME = 0.25         # before ducking; it dips automatically under the voice
 VIDEO_CRF = 23              # lower = better quality, bigger file
@@ -616,16 +616,12 @@ def make_thumbnail(image_path, title, out_path, tmp):
 def main():
     manifest = json.loads(os.environ["MANIFEST_JSON"])
     global WIDTH, HEIGHT, SUBTITLES, SUB_WRAP_CHARS, SUB_CHUNK_CHARS, SUB_BOTTOM_MARGIN, SUB_FONT_SIZE
-    _asp = str(manifest.get("aspect") or "").strip()
-    if _asp in ("16:9", "4:3", "1:1"):
-        WIDTH, HEIGHT = {"16:9": (1920, 1080), "4:3": (1440, 1080), "1:1": (1080, 1080)}[_asp]
-        # subtitles for wide pictures: longer lines, lower on the screen (the defaults above are made for tall phone video)
-        if _asp == "16:9":
-            SUB_WRAP_CHARS, SUB_CHUNK_CHARS, SUB_BOTTOM_MARGIN, SUB_FONT_SIZE = 46, 92, 90, 46
-        elif _asp == "4:3":
-            SUB_WRAP_CHARS, SUB_CHUNK_CHARS, SUB_BOTTOM_MARGIN, SUB_FONT_SIZE = 38, 76, 100, 46
-        else:
-            SUB_WRAP_CHARS, SUB_CHUNK_CHARS, SUB_BOTTOM_MARGIN, SUB_FONT_SIZE = 32, 64, 140, 46
+    _asp = str(manifest.get("aspect") or "").strip() or "16:9"      # v61: no aspect written = horizontal 16:9
+    if _asp in ("16:9", "9:16", "4:3", "1:1"):
+        WIDTH, HEIGHT = {"16:9": (1920, 1080), "9:16": (1080, 1920), "4:3": (1440, 1080), "1:1": (1080, 1080)}[_asp]
+        # subtitle layout for each shape: (characters per line, characters per screen, bottom margin, font size)
+        SUB_WRAP_CHARS, SUB_CHUNK_CHARS, SUB_BOTTOM_MARGIN, SUB_FONT_SIZE = {
+            "16:9": (46, 92, 90, 46), "9:16": (26, 52, 300, 52), "4:3": (38, 76, 100, 46), "1:1": (32, 64, 140, 46)}[_asp]
     SUBTITLES = manifest.get("subtitles", True) is not False
     print(f"Output {WIDTH}x{HEIGHT}, subtitles {'on' if SUBTITLES else 'off'}")
     episode_id = manifest["episodeId"]
