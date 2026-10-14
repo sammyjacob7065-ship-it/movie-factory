@@ -37,7 +37,8 @@ SUBTITLES = True             # a manifest with subtitles:false removes the burne
 FPS = 30
 
 # ---------------- POLISH SETTINGS (edit here) ----------------
-ZOOM_AMOUNT = 0.12          # how far the slow zoom goes (0.12 = 12%)
+ZOOM_AMOUNT = 0.06          # how far the slow zoom goes (0.06 = 6%; was 12% and it cut heads)
+HEAD_SAFE = 0.28            # 0.5 = zoom into the centre; smaller keeps the TOP of the picture (heads) and crops the bottom more
 FADE_SECONDS = 0.30         # fade in/out at the start/end of each scene
 SCENE_TAIL_SECONDS = 0.4    # pause after each scene's narration
 SUB_FONT_SIZE = 52
@@ -148,19 +149,19 @@ def zoom_expressions(scene_index, total_frames):
     mode = scene_index % 6
     a = ZOOM_AMOUNT
     cx = "iw/2-(iw/zoom/2)"
-    cy = "ih/2-(ih/zoom/2)"
+    cy = f"(ih-ih/zoom)*{HEAD_SAFE}"      # v60: top-weighted so a zoom never slices off the top of a head
     if mode == 0:      # slow push in, centred
         z, x, y = f"1+{a}*{ease}", cx, cy
     elif mode == 1:    # slow pull out, centred
         z, x, y = f"1+{a}-{a}*{ease}", cx, cy
     elif mode == 2:    # push in while drifting upward
-        z, x, y = f"1+{a}*{ease}", cx, f"(ih-ih/zoom)*(0.65-0.45*{ease})"
+        z, x, y = f"1+{a}*{ease}", cx, f"(ih-ih/zoom)*(0.45-0.25*{ease})"
     elif mode == 3:    # pan left to right
         z, x, y = f"1+{a}", f"(iw-iw/zoom)*{ease}", cy
     elif mode == 4:    # pan right to left
         z, x, y = f"1+{a}", f"(iw-iw/zoom)*(1-{ease})", cy
     else:              # pull out while drifting downward
-        z, x, y = f"1+{a}-{a}*{ease}", cx, f"(ih-ih/zoom)*(0.30+0.45*{ease})"
+        z, x, y = f"1+{a}-{a}*{ease}", cx, f"(ih-ih/zoom)*(0.15+0.25*{ease})"
     return z, x, y
 
 
