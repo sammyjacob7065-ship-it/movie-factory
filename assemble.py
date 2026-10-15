@@ -45,6 +45,12 @@ SUB_FONT_SIZE = 46
 SUB_WRAP_CHARS = 46         # characters per subtitle line (horizontal film)
 SUB_CHUNK_CHARS = 92        # characters per subtitle screen (about 2 lines)
 SUB_BOTTOM_MARGIN = 90      # pixels from the bottom
+
+# ---- BRAND WATERMARK (edit here) ----
+WATERMARK_TEXT = "Sammys_galories"   # "" = no watermark
+WATERMARK_OPACITY = 0.40            # 0.0 invisible ... 1.0 solid; 0.35-0.5 looks professional
+WATERMARK_SIZE = 0.028              # letter height as a share of the short side of the frame (0.028 = small)
+WATERMARK_POSITION = "top-right"    # top-right, top-left, bottom-right or bottom-left
 MUSIC_PATH = "assets/music/default.mp3"
 MUSIC_VOLUME = 0.25         # before ducking; it dips automatically under the voice
 VIDEO_CRF = 23              # lower = better quality, bigger file
@@ -229,6 +235,36 @@ def subtitle_filters(text, duration, tmp, tag):
     return filters
 
 
+def watermark_filter():
+    """A small see-through brand name in one corner of every scene (same spot for the whole film)."""
+    if not WATERMARK_TEXT:
+        return []
+    short = min(WIDTH, HEIGHT)
+    size = max(18, int(short * WATERMARK_SIZE))
+    m = max(16, int(short * 0.035))
+    pos = {
+        "top-right": (f"w-text_w-{m}", f"{m}"),
+        "top-left": (f"{m}", f"{m}"),
+        "bottom-right": (f"w-text_w-{m}", f"h-text_h-{m}"),
+        "bottom-left": (f"{m}", f"h-text_h-{m}"),
+    }.get(WATERMARK_POSITION, (f"w-text_w-{m}", f"{m}"))
+    safe = WATERMARK_TEXT.replace("\\", "").replace("'", "").replace(":", "").replace("%", "")
+    parts = []
+    font = find_font()
+    if font:
+        parts.append(f"fontfile={font}")
+    parts += [
+        f"text='{safe}'",
+        "expansion=none",
+        f"fontsize={size}",
+        f"fontcolor=white@{WATERMARK_OPACITY}",
+        f"shadowcolor=black@{WATERMARK_OPACITY * 0.6:.2f}",
+        "shadowx=2", "shadowy=2",
+        f"x={pos[0]}", f"y={pos[1]}",
+    ]
+    return ["drawtext=" + ":".join(parts)]
+
+
 def build_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, segment_path):
     """One scene: composite image + eased zoom + subtitles + fades + audio."""
     composite = os.path.join(tmp, f"composite_{scene_index:03d}.png")
@@ -243,6 +279,7 @@ def build_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, 
         f"zoompan=z='{z}':x='{x}':y='{y}':d=1:s={WIDTH}x{HEIGHT}:fps={FPS}",
     ]
     vf_parts += subtitle_filters(sub_text, duration, tmp, f"s{scene_index:03d}")
+    vf_parts += watermark_filter()
     vf_parts.append(
         f"fade=t=in:st=0:d={FADE_SECONDS},fade=t=out:st={fade_out_start:.3f}:d={FADE_SECONDS}"
     )
@@ -285,6 +322,7 @@ def build_clip_segment(scene_index, clip_path, audio_path, duration, sub_text, t
         chain += f",tpad=stop_mode=clone:stop_duration={duration - clip_dur + 0.5:.3f}"
 
     steps = subtitle_filters(sub_text, duration, tmp, f"c{scene_index:03d}")
+    steps += watermark_filter()
     steps.append(f"fade=t=in:st=0:d={FADE_SECONDS}")
     steps.append(f"fade=t=out:st={fade_out_start:.3f}:d={FADE_SECONDS}")
     steps.append("format=yuv420p")
