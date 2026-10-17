@@ -20,7 +20,9 @@ NEW: animated clips.
 """
 
 import json
+import math
 import os
+import random
 import re
 import subprocess
 import tempfile
@@ -51,6 +53,17 @@ WATERMARK_TEXT = "Sammys_galories"   # "" = no watermark
 WATERMARK_OPACITY = 0.40            # 0.0 invisible ... 1.0 solid; 0.35-0.5 looks professional
 WATERMARK_SIZE = 0.028              # letter height as a share of the short side of the frame (0.028 = small)
 WATERMARK_POSITION = "top-right"    # top-right, top-left, bottom-right or bottom-left
+SFX_ENABLED = True          # the film's sound effects (planned from the script by the "sound supervisor" in n8n) are mixed in
+SFX_ONCE_REL_DB = -7.0      # loudness of a single event (explosion, door slam) compared with the narration
+SFX_REPEAT_REL_DB = -10.0   # repeated hits (fight blows, sword clashes, knocks)
+SFX_BED_REL_DB = -16.0      # continuous beds (engine, footsteps, rain, crowd) sit well under the voice
+SFX_MUSIC_REL_DB = -21.0    # slow background music, far under the narration
+SFX_MUSIC_DUCK_RATIO = 6.0  # music dips firmly while the narrator speaks
+MUSIC_DIR = "assets/music"  # optional: put calm.mp3, sad.mp3, tense.mp3, mysterious.mp3, hopeful.mp3 here for real tracks;
+                            # a mood without a file gets a slow generated pad instead
+SKIP_DEFAULT_MUSIC = False  # set to True automatically when the film has its own planned music
+SFX_DUCK_RATIO = 2.5        # effects dip a little while the narrator speaks (1 = no dipping)
+SFX_MAX_EVENTS = 120        # most hits one repeating cue may place
 MUSIC_PATH = "assets/music/default.mp3"
 MUSIC_VOLUME = 0.25         # before ducking; it dips automatically under the voice
 VIDEO_CRF = 23              # lower = better quality, bigger file
@@ -132,6 +145,232 @@ def find_font():
 
 
 # ---------------------------------------------------------------- polish helpers
+
+def mean_volume_db(path):
+    """Average loudness of a file in dB (None if it cannot be measured)."""
+    p = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", path, "-af", "volumedetect", "-vn", "-f", "null", "-"],
+                       capture_output=True, text=True)
+    m = re.search(r"mean_volume:\s*(-?[\d.]+) dB", p.stderr or "")
+    return float(m.group(1)) if m else None
+
+
+def peak_volume_db(path):
+    """Loudest moment of a file in dB (None if it cannot be measured)."""
+    p = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", path, "-af", "volumedetect", "-vn", "-f", "null", "-"],
+                       capture_output=True, text=True)
+    m = re.search(r"max_volume:\s*(-?[\d.]+) dB", p.stderr or "")
+    return float(m.group(1)) if m else None
+
+
+def _fx_download(url, tmp, tag):
+    raw = os.path.join(tmp, f"fx_{tag}.mp3")
+    download(url, raw)
+    length = probe_duration(raw)
+    if length < 0.15:
+        raise RuntimeError("sound file is empty")
+    return raw, length, mean_volume_db(raw), peak_volume_db(raw)
+
+
+def _fx_gain(mean, peak, target_mean, peak_cap):
+    """Gain that brings the file's average to target_mean, but never lets its loudest moment pass peak_cap
+    (a short punch in a long quiet file would otherwise be pushed far too loud)."""
+    if mean is None:
+        return -12.0
+    g = target_mean - mean
+    if peak is not None:
+        g = min(g, peak_cap - peak)
+    return max(-25.0, min(25.0, g))
+
+
+MOOD_CHORDS = {   # slow pads: the notes (Hz) of each mood
+    "calm": [130.81, 164.81, 196.00, 261.63],
+    "hopeful": [146.83, 185.00, 220.00, 293.66],
+    "sad": [110.00, 130.81, 164.81, 220.00],
+    "mysterious": [73.42, 110.00, 174.61, 220.00],
+    "tense": [82.41, 87.31, 123.47, 164.81],
+}
+
+
+def make_pad(mood, seconds, out_path):
+    """A slow, soft generated pad (no music file needed): a few sine notes that swell and fade at different speeds,
+    softened with a low-pass filter and a long echo."""
+    notes = MOOD_CHORDS.get(mood) or MOOD_CHORDS["calm"]
+    expr = "0"
+    for i, f in enumerate(notes):
+        r = 0.045 + 0.013 * i
+        ph = i * 1.7
+        expr += (f"+0.22*sin(2*PI*{f}*t+{ph:.2f})*(0.65+0.35*sin(2*PI*{r:.3f}*t+{ph:.2f}))"
+                 f"+0.06*sin(2*PI*{f * 2.003:.2f}*t)*(0.5+0.5*sin(2*PI*{r * 1.3:.3f}*t))")
+    run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"aevalsrc={expr}:s=44100:d={seconds:.2f}:c=stereo",
+         "-af", "lowpass=f=1100,aecho=0.8:0.85:90|180:0.35|0.25,volume=0.5", "-ar", "44100", "-ac", "2", out_path])
+
+
+def render_music_layer(cue, span, narr_mean, tmp, idx):
+    """Slow background music for a stretch of the film: a track from assets/music/<mood>.mp3 if you added one, else a generated pad."""
+    mood = str(cue.get("q") or "calm").strip().lower()
+    span = min(max(span, 1.0), 900.0)
+    vol = min(max(float(cue.get("vol") or 0.5), 0.2), 1.5)
+    target = narr_mean + SFX_MUSIC_REL_DB + 20 * math.log10(vol / 0.5)
+    out = os.path.join(tmp, f"fxlayer_{idx}.wav")
+    fin = min(2.5, span / 3)
+    fout = min(3.5, span / 3)
+    src = os.path.join(MUSIC_DIR, f"{mood}.mp3")
+    cmd = ["ffmpeg", "-y"]
+    if os.path.exists(src):
+        mean = mean_volume_db(src)
+        length = probe_duration(src)
+        if length < span:
+            cmd += ["-stream_loop", "-1"]
+    else:
+        src = os.path.join(tmp, f"pad_{idx}.wav")
+        make_pad(mood, span + 1.0, src)
+        mean = mean_volume_db(src)
+    gain = max(-30.0, min(30.0, target - mean)) if mean is not None else -15.0
+    cmd += ["-i", src, "-t", f"{span:.3f}", "-af",
+            f"aformat=sample_rates=44100:channel_layouts=stereo,volume={gain:.1f}dB,afade=t=in:st=0:d={fin:.2f},afade=t=out:st={max(span - fout, 0):.3f}:d={fout:.2f}",
+            "-ar", "44100", "-ac", "2", out]
+    run(cmd)
+    return out
+
+
+def render_fx_layer(cue, t0, t1, narr_mean, tmp, idx):
+    """Render ONE sound cue into a stereo wav that is exactly (t1 - t0) seconds long.
+    once   = a single event;  bed = the sound runs without a gap (looped) until the action stops;
+    repeat = the same kind of hit again and again with natural gaps (several different files are rotated)."""
+    span = max(0.3, t1 - t0)
+    kind = cue.get("kind") or "once"
+    vol = min(max(float(cue.get("vol") or 0.7), 0.2), 1.5)
+    vol_db = 20 * math.log10(vol / 0.7)
+    if kind == "music":
+        return render_music_layer(cue, span, narr_mean, tmp, idx)
+    out = os.path.join(tmp, f"fxlayer_{idx}.wav")
+    fmt = "aformat=sample_rates=44100:channel_layouts=stereo"
+    urls = [u for u in (cue.get("urls") or []) if u][:3]
+    files = []
+    for k, u in enumerate(urls):
+        try:
+            files.append(_fx_download(u, tmp, f"{idx}_{k}"))
+        except Exception as e:
+            print(f"::warning::sound cue {idx}: file {k} skipped ({e})")
+    if not files:
+        raise RuntimeError("no usable sound file")
+    if kind == "bed":
+        raw, length, mean, peak = files[0]
+        gain = _fx_gain(mean, peak, narr_mean + SFX_BED_REL_DB + vol_db, narr_mean + SFX_BED_REL_DB + 8 + vol_db)
+        fin = min(1.0, span / 3)
+        fout = min(1.5, span / 3)
+        cmd = ["ffmpeg", "-y"]
+        if length < span:
+            cmd += ["-stream_loop", "-1"]            # a short sound repeats without a gap for the whole span
+        cmd += ["-i", raw, "-t", f"{span:.3f}", "-af",
+                f"{fmt},volume={gain:.1f}dB,afade=t=in:st=0:d={fin:.2f},afade=t=out:st={max(span - fout, 0):.3f}:d={fout:.2f}",
+                "-ar", "44100", "-ac", "2", out]
+        run(cmd)
+    elif kind == "repeat":
+        gap = min(max(float(cue.get("gap") or 1.3), 0.35), 8.0)
+        rnd = random.Random(int(cue.get("id") or idx) * 7919)
+        times, t = [], 0.0
+        while t < span - 0.2 and len(times) < SFX_MAX_EVENTS:
+            times.append(t)
+            t += gap * (0.75 + 0.5 * rnd.random())     # natural, uneven gaps
+        order = [rnd.randrange(len(files)) for _ in times]
+        cmd = ["ffmpeg", "-y"]
+        for raw, _, _, _ in files:
+            cmd += ["-i", raw]
+        parts, labels = [], []
+        for vi, (raw, length, mean, peak) in enumerate(files):
+            uses = [j for j, o in enumerate(order) if o == vi]
+            if not uses:
+                continue
+            base = _fx_gain(mean, peak, narr_mean + SFX_REPEAT_REL_DB + vol_db, narr_mean + 3 + vol_db)
+            if len(uses) == 1:
+                parts.append(f"[{vi}:a]{fmt}[v{vi}_0]")
+            else:
+                parts.append(f"[{vi}:a]{fmt},asplit={len(uses)}" + "".join(f"[v{vi}_{n}]" for n in range(len(uses))))
+            for n, j in enumerate(uses):
+                play = min(length, 3.5)
+                ms = int(times[j] * 1000)
+                jit = base + rnd.uniform(-2.0, 1.5)    # every hit a little different in loudness
+                parts.append(f"[v{vi}_{n}]atrim=0:{play:.3f},asetpts=PTS-STARTPTS,volume={jit:.1f}dB,"
+                             f"afade=t=out:st={max(play - 0.25, 0):.3f}:d=0.25,adelay={ms}|{ms}[e{j}]")
+                labels.append(f"[e{j}]")
+        parts.append("".join(labels) + f"amix=inputs={len(labels)}:duration=longest:normalize=0,atrim=0:{span:.3f},apad=whole_dur={span:.3f}[o]")
+        cmd += ["-filter_complex", ";".join(parts), "-map", "[o]", "-ar", "44100", "-ac", "2", out]
+        run(cmd)
+    else:  # once
+        raw, length, mean, peak = files[0]
+        gain = _fx_gain(mean, peak, narr_mean + SFX_ONCE_REL_DB + vol_db, narr_mean + 6 + vol_db)
+        play = min(length, 6.0, span)
+        fade = min(0.4, play / 2)
+        run(["ffmpeg", "-y", "-i", raw, "-af",
+             f"{fmt},atrim=0:{play:.3f},volume={gain:.1f}dB,afade=t=in:st=0:d=0.03,afade=t=out:st={max(play - fade, 0):.3f}:d={fade:.3f}",
+             "-ar", "44100", "-ac", "2", out])
+    return out
+
+
+def apply_sfx(joined_path, cues, spans, tmp):
+    """Add the film's sound effects to the finished picture. Every cue is laid on ONE timeline for the whole film, so a
+    bed (engine, footsteps, rain) or a fight keeps going across scene cuts and stops when the action stops.
+    Returns the path of the new file (or the original if there is nothing to add)."""
+    total = probe_duration(joined_path)
+    narr_mean = mean_volume_db(joined_path)
+    if narr_mean is None:
+        narr_mean = -20.0
+    layers = []
+    for idx, cue in enumerate(cues):
+        try:
+            a = int(cue.get("scene_from") or 0)
+            b = int(cue.get("scene_to") or a)
+            if a not in spans:
+                continue
+            if b not in spans or b < a:
+                b = a
+            t0 = spans[a][0] + min(max(float(cue.get("from") or 0), 0.0), 0.97) * spans[a][1]
+            if (cue.get("kind") or "once") == "once":
+                t1 = min(total, t0 + 6.0)
+            else:
+                t1 = spans[b][0] + min(max(float(cue.get("to") or 1), 0.05), 1.0) * spans[b][1]
+            t1 = min(t1, total)
+            if t1 - t0 < 0.3:
+                continue
+            wav = render_fx_layer(cue, t0, t1, narr_mean, tmp, idx + 1)
+            layers.append((wav, t0, (cue.get('kind') == 'music')))
+            print(f"sound cue {idx + 1} ({cue.get('kind')}, '{cue.get('q')}'): {t0:.1f}s - {t1:.1f}s")
+        except Exception as e:
+            print(f"::warning::sound cue {idx + 1} skipped ({e})")
+    if not layers:
+        return joined_path
+    out_path = os.path.join(tmp, "joined_fx.mp4")
+    cmd = ["ffmpeg", "-y", "-i", joined_path]
+    parts = []
+    fx_ids, mu_ids = [], []
+    for i, (wav, t0, is_music) in enumerate(layers, start=1):
+        cmd += ["-i", wav]
+        ms = int(t0 * 1000)
+        parts.append(f"[{i}:a]adelay={ms}|{ms}[l{i}]")
+        (mu_ids if is_music else fx_ids).append(i)
+    groups = (fx_ids and 1 or 0) + (mu_ids and 1 or 0)
+    side_n = groups + 1
+    parts.append("[0:a]aformat=sample_rates=44100:channel_layouts=stereo,asplit=%d[narr]%s" % (side_n, "".join(f"[nside{k}]" for k in range(groups))))
+    final_in, k = ["[narr]"], 0
+    for name, ids, ratio in (("sfx", fx_ids, SFX_DUCK_RATIO), ("mus", mu_ids, SFX_MUSIC_DUCK_RATIO)):
+        if not ids:
+            continue
+        mix_in = "".join(f"[l{i}]" for i in ids)
+        parts.append(f"{mix_in}amix=inputs={len(ids)}:duration=longest:normalize=0[{name}raw]")
+        parts.append(f"[{name}raw][nside{k}]sidechaincompress=threshold=0.05:ratio={ratio}:attack=30:release=500[{name}d]")
+        final_in.append(f"[{name}d]")
+        k += 1
+    parts.append("".join(final_in) + f"amix=inputs={len(final_in)}:duration=first:normalize=0,alimiter=limit=0.97[aout]")
+    cmd += ["-filter_complex", ";".join(parts), "-map", "0:v", "-map", "[aout]",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2", "-t", f"{total:.3f}", out_path]
+    run(cmd)
+    if mu_ids:
+        global SKIP_DEFAULT_MUSIC
+        SKIP_DEFAULT_MUSIC = True        # the film has its own planned music: the always-on default track would double it
+    print(f"{len(layers)} sound cue(s) mixed into the film")
+    return out_path
+
 
 def build_composite(image_path, out_path):
     """Fit the image inside the 9:16 frame on a blurred, darkened copy of itself.
@@ -354,7 +593,7 @@ def build_clip_segment(scene_index, clip_path, audio_path, duration, sub_text, t
 def master_audio_and_music(final_path, out_path):
     """Level the narration, duck background music under it, and add faststart."""
     total = probe_duration(final_path)
-    if os.path.exists(MUSIC_PATH):
+    if os.path.exists(MUSIC_PATH) and not SKIP_DEFAULT_MUSIC:
         fade_start = max(total - 3, 0)
         fc = (
             "[0:a]aresample=async=1:first_pts=0,loudnorm=I=-16:TP=-1.5:LRA=11,asplit=2[voice][side];"
@@ -675,6 +914,14 @@ def main():
                 continue
     print(f"animated clips offered for {len(clip_by_scene)} scene(s)")
 
+    # sound-effect plan offered by n8n (from the script's SOUND lines and the story itself)
+    sfx_cues = []
+    if SFX_ENABLED:
+        for c in manifest.get("sfx") or []:
+            if isinstance(c, dict) and (c.get("urls") or c.get("kind") == "music"):
+                sfx_cues.append(c)
+    print(f"sound-effect cues offered: {len(sfx_cues)}")
+
     try:
         ep_rows = sb_get(f"episodes?id=eq.{episode_id}&select=script_lines,scenes,title,status")
         if not ep_rows:
@@ -709,6 +956,8 @@ def main():
 
         with tempfile.TemporaryDirectory() as tmp:
             segment_paths = []
+            scene_spans = {}     # scene number -> (start second in the film, length), for placing sound effects
+            film_cursor = 0.0
 
             for i, scene in enumerate(scenes):
                 scene_num = scene["scene_number"]
@@ -770,6 +1019,12 @@ def main():
                     build_segment(i, image_path, scene_audio_path, duration, sub_text, tmp, segment_path)
 
                 segment_paths.append(segment_path)
+                try:
+                    seg_len = probe_duration(segment_path)
+                except Exception:
+                    seg_len = duration
+                scene_spans[int(scene_num)] = (film_cursor, seg_len)
+                film_cursor += seg_len
 
             final_list = os.path.join(tmp, "final_list.txt")
             with open(final_list, "w") as f:
@@ -778,6 +1033,12 @@ def main():
             joined_path = os.path.join(tmp, "joined.mp4")
             run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", final_list,
                  "-c", "copy", joined_path])
+
+            if sfx_cues:
+                try:
+                    joined_path = apply_sfx(joined_path, sfx_cues, scene_spans, tmp)
+                except Exception as e:
+                    print(f"::warning::sound effects could not be added ({e}) - the film keeps its narration only")
 
             final_path = os.path.join(tmp, "final.mp4")
             master_audio_and_music(joined_path, final_path)
