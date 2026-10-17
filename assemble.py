@@ -42,6 +42,7 @@ FPS = 30
 ZOOM_AMOUNT = 0.06          # how far the slow zoom goes (0.06 = 6%; was 12% and it cut heads)
 HEAD_SAFE = 0.28            # 0.5 = zoom into the centre; smaller keeps the TOP of the picture (heads) and crops the bottom more
 FADE_SECONDS = 0.30         # fade in/out at the start/end of each STILL-IMAGE scene (animated clips cut straight, like a real film)
+CLIP_JOIN_BLEND = 0.30     # v65: seconds. The end of an animated scene melts into the FIRST picture of the next animated scene, so the cut has no jump (0 = off). No black, no length change.
 CLIP_SCENE_FADES = False    # True = animated clips fade in/out too
 SCENE_TAIL_SECONDS = 0.4    # pause after each scene's narration
 SUB_FONT_SIZE = 46
@@ -543,7 +544,7 @@ def build_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, 
     ])
 
 
-def build_clip_segment(scene_index, clip_path, audio_path, duration, sub_text, tmp, segment_path):
+def build_clip_segment(scene_index, clip_path, audio_path, duration, sub_text, tmp, segment_path, next_frame=None):
     """One scene from an animated clip: the clip is fitted to the 9:16 frame on a blurred
     copy of itself (same look as the stills), then subtitles + fades + the scene's voice.
     A clip shorter than the narration is looped (or its last frame is held); a longer one is cut."""
@@ -560,6 +561,21 @@ def build_clip_segment(scene_index, clip_path, audio_path, duration, sub_text, t
     )
     if short and CLIP_FILL_MODE == "hold":
         chain += f",tpad=stop_mode=clone:stop_duration={duration - clip_dur + 0.5:.3f}"
+    blend = min(CLIP_JOIN_BLEND, max(duration - 0.3, 0)) if next_frame else 0
+    if blend > 0.05:
+        # the last moments melt into the first picture of the next clip scene (video only: timing and sound do not change)
+        chain += (
+            "[vm];"
+            "[2:v]split=2[nbg][nfg];"
+            f"[nbg]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={WIDTH}:{HEIGHT},boxblur=40:6,eq=brightness=-0.12[nb];"
+            f"[nfg]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease:flags=lanczos[nf];"
+            f"[nb][nf]overlay=(W-w)/2:(H-h)/2,fps={FPS},format=yuva420p,"
+            f"fade=t=in:st={max(duration - blend, 0):.3f}:d={blend:.3f}:alpha=1[nx];"
+            "[vm][nx]overlay=format=auto"
+        )
+    else:
+        next_frame = None
 
     steps = subtitle_filters(sub_text, duration, tmp, f"c{scene_index:03d}")
     steps += watermark_filter()
@@ -589,6 +605,10 @@ def build_clip_segment(scene_index, clip_path, audio_path, duration, sub_text, t
     cmd += [
         "-i", clip_path,
         "-i", audio_path,
+    ]
+    if next_frame:
+        cmd += ["-loop", "1", "-framerate", str(FPS), "-i", next_frame]
+    cmd += [
         "-filter_complex", fc,
         "-map", "[vout]", "-map", "1:a",
         "-af", af,
@@ -1009,8 +1029,25 @@ def main():
                 if clip_url:
                     try:
                         clip_path = os.path.join(tmp, f"s{scene_num}_clip.mp4")
-                        download(clip_url, clip_path)
-                        build_clip_segment(i, clip_path, scene_audio_path, duration, sub_text, tmp, segment_path)
+                        if not os.path.exists(clip_path):
+                            download(clip_url, clip_path)
+                        next_frame = None
+                        if CLIP_JOIN_BLEND > 0 and i + 1 < len(scenes):
+                            try:
+                                nn = int(scenes[i + 1]["scene_number"])
+                                nurl = clip_by_scene.get(nn)
+                                if nurl:
+                                    npath = os.path.join(tmp, f"s{nn}_clip.mp4")
+                                    if not os.path.exists(npath):
+                                        download(nurl, npath)
+                                    nf = os.path.join(tmp, f"s{nn}_first.png")
+                                    run(["ffmpeg", "-y", "-i", npath, "-frames:v", "1", nf])
+                                    if os.path.exists(nf):
+                                        next_frame = nf
+                            except Exception as e:
+                                print(f"::warning::scene {scene_num}: soft join skipped ({e})")
+                                next_frame = None
+                        build_clip_segment(i, clip_path, scene_audio_path, duration, sub_text, tmp, segment_path, next_frame)
                         built = True
                         print(f"scene {scene_num}: built from the animated clip")
                     except Exception as e:
