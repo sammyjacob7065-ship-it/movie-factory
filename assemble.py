@@ -69,7 +69,7 @@ MUSIC_PATH = "assets/music/default.mp3"
 MUSIC_VOLUME = 0.25         # before ducking; it dips automatically under the voice
 VIDEO_CRF = 23              # lower = better quality, bigger file
 VIDEO_MAXRATE = "3M"        # caps file size
-CLIP_FILL_MODE = "loop"     # clip shorter than the narration: "loop" it, or "hold" its last frame
+CLIP_FILL_MODE = "hold"     # clip shorter than the scene's voice: "hold" its last frame (v64: never "loop" - looping made an action play twice)
 
 # ---- YOUTUBE THUMBNAIL (edit here) ----
 THUMB_ENABLED = True        # make a 1280x720 cover picture with the film title and upload it next to the video
