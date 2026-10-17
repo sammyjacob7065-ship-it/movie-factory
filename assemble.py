@@ -42,6 +42,8 @@ FPS = 30
 ZOOM_AMOUNT = 0.06          # how far the slow zoom goes (0.06 = 6%; was 12% and it cut heads)
 HEAD_SAFE = 0.28            # 0.5 = zoom into the centre; smaller keeps the TOP of the picture (heads) and crops the bottom more
 FADE_SECONDS = 0.30         # fade in/out at the start/end of each STILL-IMAGE scene (animated clips cut straight, like a real film)
+CLIP_SCENE_TAIL_SECONDS = 0.12  # v66: pause after the voice in an ANIMATED scene (stills keep SCENE_TAIL_SECONDS). A long silent pause with a frozen picture was the 'hiccup' between scenes.
+CLIP_MAX_STRETCH = 1.20     # v66: a clip a little shorter than its voice is slowed by up to 20% to fill the scene (almost unnoticeable) instead of freezing on its last frame
 CLIP_JOIN_BLEND = 0.30     # v65: seconds. The end of an animated scene melts into the FIRST picture of the next animated scene, so the cut has no jump (0 = off). No black, no length change.
 CLIP_SCENE_FADES = False    # True = animated clips fade in/out too
 SCENE_TAIL_SECONDS = 0.4    # pause after each scene's narration
@@ -552,9 +554,14 @@ def build_clip_segment(scene_index, clip_path, audio_path, duration, sub_text, t
     fade_out_start = max(duration - FADE_SECONDS, 0)
     short = clip_dur < duration
 
+    ratio = 1.0
+    if clip_dur > 0 and clip_dur < duration and CLIP_FILL_MODE == "hold":
+        ratio = min(CLIP_MAX_STRETCH, duration / clip_dur)
+    clip_dur = clip_dur * ratio
+    short = clip_dur < duration - 0.02
     chain = (
-        "[0:v]split=2[bgsrc][fgsrc];"
-        f"[bgsrc]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
+        (f"[0:v]setpts=PTS*{ratio:.4f},split=2[bgsrc][fgsrc];" if ratio > 1.001 else "[0:v]split=2[bgsrc][fgsrc];")
+        + f"[bgsrc]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
         f"crop={WIDTH}:{HEIGHT},boxblur=40:6,eq=brightness=-0.12[bg];"
         f"[fgsrc]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease:flags=lanczos[fg];"
         f"[bg][fg]overlay=(W-w)/2:(H-h)/2,fps={FPS}"
@@ -1008,7 +1015,7 @@ def main():
                     # decode to one clean, identical format (44.1kHz stereo) so every scene joins perfectly
                     run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list,
                          "-ar", "44100", "-ac", "2", scene_audio_path])
-                    duration = probe_duration(scene_audio_path) + SCENE_TAIL_SECONDS
+                    duration = probe_duration(scene_audio_path) + (CLIP_SCENE_TAIL_SECONDS if clip_by_scene.get(int(scene_num)) else SCENE_TAIL_SECONDS)
                 else:
                     print(f"::warning::scene {scene_num} has no completed voice lines, using silence")
                     duration = max(scene.get("duration_seconds", 3), 3)
@@ -1078,8 +1085,14 @@ def main():
                 for p in segment_paths:
                     f.write(f"file '{p}'\n")
             joined_path = os.path.join(tmp, "joined.mp4")
+            # v66: the scenes are joined with ONE clean re-encode (not a stream copy): every join gets continuous timestamps,
+            # the same frame rate/size/pixel format/aspect, and no audio-priming gap, so no player can hiccup at a cut.
             run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", final_list,
-                 "-c", "copy", joined_path])
+                 "-vf", f"scale={WIDTH}:{HEIGHT}:flags=lanczos,setsar=1,fps={FPS},format=yuv420p",
+                 "-af", "aresample=async=1:first_pts=0,aformat=sample_rates=44100:channel_layouts=stereo",
+                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-r", str(FPS),
+                 "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+                 "-fflags", "+genpts", "-avoid_negative_ts", "make_zero", joined_path])
 
             if sfx_cues:
                 try:
