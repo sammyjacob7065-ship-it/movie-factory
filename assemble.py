@@ -41,7 +41,8 @@ FPS = 30
 # ---------------- POLISH SETTINGS (edit here) ----------------
 ZOOM_AMOUNT = 0.06          # how far the slow zoom goes (0.06 = 6%; was 12% and it cut heads)
 HEAD_SAFE = 0.28            # 0.5 = zoom into the centre; smaller keeps the TOP of the picture (heads) and crops the bottom more
-FADE_SECONDS = 0.30         # fade in/out at the start/end of each scene
+FADE_SECONDS = 0.30         # fade in/out at the start/end of each STILL-IMAGE scene (animated clips cut straight, like a real film)
+CLIP_SCENE_FADES = False    # True = animated clips fade in/out too
 SCENE_TAIL_SECONDS = 0.4    # pause after each scene's narration
 SUB_FONT_SIZE = 46
 SUB_WRAP_CHARS = 46         # characters per subtitle line (horizontal film)
@@ -562,16 +563,25 @@ def build_clip_segment(scene_index, clip_path, audio_path, duration, sub_text, t
 
     steps = subtitle_filters(sub_text, duration, tmp, f"c{scene_index:03d}")
     steps += watermark_filter()
-    steps.append(f"fade=t=in:st=0:d={FADE_SECONDS}")
-    steps.append(f"fade=t=out:st={fade_out_start:.3f}:d={FADE_SECONDS}")
+    if CLIP_SCENE_FADES:
+        steps.append(f"fade=t=in:st=0:d={FADE_SECONDS}")
+        steps.append(f"fade=t=out:st={fade_out_start:.3f}:d={FADE_SECONDS}")
     steps.append("format=yuv420p")
     fc = chain + "," + ",".join(steps) + "[vout]"
 
-    af = (
-        f"afade=t=in:st=0:d=0.2,"
-        f"afade=t=out:st={max(duration - 0.25, 0):.3f}:d=0.25,"
-        "apad"
-    )
+    if CLIP_SCENE_FADES:
+        af = (
+            f"afade=t=in:st=0:d=0.2,"
+            f"afade=t=out:st={max(duration - 0.25, 0):.3f}:d=0.25,"
+            "apad"
+        )
+    else:
+        # no dip between scenes: only a tiny fade to avoid a click at the cut
+        af = (
+            f"afade=t=in:st=0:d=0.02,"
+            f"afade=t=out:st={max(duration - 0.03, 0):.3f}:d=0.03,"
+            "apad"
+        )
 
     cmd = ["ffmpeg", "-y"]
     if short and CLIP_FILL_MODE != "hold":
