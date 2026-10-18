@@ -629,6 +629,269 @@ def build_clip_segment(scene_index, clip_path, audio_path, duration, sub_text, t
     run(cmd)
 
 
+# =====================================================================================================
+# LIP SYNC (v68): Wav2Lip (ONNX, CPU) on the GitHub runner. Only the lower half of the SPEAKER's face is replaced, only while that
+# character's line is playing, with a soft edge, matched skin colour and a short fade in/out. Eyes, brows, head and body stay exactly
+# as the video model made them (that is where the natural gestures live). Narrator lines and listeners are never touched.
+# Safe by design: no model / no face / any error = the clip is used as it is, the film never fails because of lip sync.
+# Wav2Lip licence: personal / research / non-commercial. Check before monetising.
+# =====================================================================================================
+LIPSYNC_ENABLED = True
+LIPSYNC_MODEL_URL = "https://huggingface.co/bluefoxcreation/Wav2lip-Onnx/resolve/main/wav2lip_gan.onnx"
+LIPSYNC_YUNET_URL = "https://raw.githubusercontent.com/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
+LIPSYNC_RAMP = 0.12          # seconds: the new mouth fades in/out at the edges of a spoken line
+LIPSYNC_MIN_SHARE = 0.25     # if a face was found in fewer than this share of the speaking frames, the clip is left untouched
+LIPSYNC_STUB = os.environ.get("LIPSYNC_STUB") == "1"   # test mode: fake face and fake model (no downloads)
+
+_LS = {}
+
+
+def _ls_mel_filters(sr=16000, n_fft=800, n_mels=80, fmin=55.0, fmax=7600.0):
+    import numpy as np
+
+    def hz2mel(f):
+        f = np.asarray(f, dtype=float); lg = np.log(6.4) / 27.0
+        return np.where(f >= 1000.0, 15.0 + np.log(np.maximum(f, 1e-9) / 1000.0) / lg, f / (200.0 / 3))
+
+    def mel2hz(m):
+        m = np.asarray(m, dtype=float); lg = np.log(6.4) / 27.0
+        return np.where(m >= 15.0, 1000.0 * np.exp(lg * (m - 15.0)), m * (200.0 / 3))
+    fftf = np.linspace(0, sr / 2, 1 + n_fft // 2)
+    mf = mel2hz(np.linspace(hz2mel(fmin), hz2mel(fmax), n_mels + 2))
+    fdiff = np.diff(mf); ramps = mf[:, None] - fftf[None, :]
+    lower = -ramps[:-2] / fdiff[:-1, None]; upper = ramps[2:] / fdiff[1:, None]
+    w = np.maximum(0, np.minimum(lower, upper))
+    return (w * (2.0 / (mf[2:n_mels + 2] - mf[:n_mels]))[:, None]).astype(np.float32)
+
+
+def _ls_mel(wav16k_path):
+    """Wav2Lip's own mel settings: 80 mel rows, 80 columns per second."""
+    import numpy as np
+    from scipy import signal
+    from scipy.io import wavfile
+    sr, y = wavfile.read(wav16k_path)
+    y = y.astype(np.float32) / (32768.0 if y.dtype == np.int16 else 1.0)
+    if y.ndim > 1:
+        y = y.mean(1)
+    y = signal.lfilter([1, -0.97], [1], y).astype(np.float32)
+    n_fft, hop = 800, 200
+    y = np.pad(y, n_fft // 2, mode="reflect")
+    win = signal.get_window("hann", n_fft, fftbins=True).astype(np.float32)
+    nfr = 1 + (len(y) - n_fft) // hop
+    idx = np.arange(n_fft)[None, :] + hop * np.arange(nfr)[:, None]
+    mag = np.abs(np.fft.rfft(y[idx] * win[None, :], axis=1)).T
+    if "melb" not in _LS:
+        _LS["melb"] = _ls_mel_filters()
+    S = 20 * np.log10(np.maximum(1e-5, _LS["melb"] @ mag)) - 20
+    return np.clip(8 * ((S + 100) / 100) - 4, -4, 4).astype(np.float32)
+
+
+def _ls_model():
+    if "sess" not in _LS:
+        import onnxruntime as ort
+        path = os.path.join(tempfile.gettempdir(), "wav2lip_gan.onnx")
+        if not os.path.exists(path):
+            r = requests.get(LIPSYNC_MODEL_URL, timeout=300)
+            r.raise_for_status()
+            with open(path + ".part", "wb") as f:
+                f.write(r.content)
+            os.replace(path + ".part", path)
+        o = ort.SessionOptions()
+        o.intra_op_num_threads = max(1, (os.cpu_count() or 2))
+        o.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        _LS["sess"] = ort.InferenceSession(path, o, providers=["CPUExecutionProvider"])
+    return _LS["sess"]
+
+
+def _ls_run(mel16, face96):
+    """mel16 (80,16), face96 (96,96,3) BGR uint8 -> (96,96,3) BGR uint8"""
+    import numpy as np
+    if LIPSYNC_STUB:
+        out = face96.copy()
+        out[60:80, 30:66] = (30, 30, 120) if int(float(mel16.mean()) * 10) % 2 else (60, 60, 160)
+        return out
+    masked = face96.copy()
+    masked[48:] = 0
+    vid = (np.concatenate([masked, face96], axis=2) / 255.0).transpose(2, 0, 1)[None].astype(np.float32)
+    pred = _ls_model().run(None, {"mel": mel16[None, None].astype(np.float32), "vid": vid})[0][0]
+    return np.clip(pred.transpose(1, 2, 0) * 255, 0, 255).astype(np.uint8)
+
+
+def _ls_detector(W, H):
+    """Returns faces(frame) -> boxes (x,y,w,h) sorted left to right. YuNet if it can be fetched, else the two Haar cascades that ship with OpenCV."""
+    import cv2
+    if LIPSYNC_STUB:
+        return lambda fr: [(int(W * 0.30), int(H * 0.25), int(W * 0.22), int(W * 0.22))]
+    yn = None
+    try:
+        path = os.path.join(tempfile.gettempdir(), "yunet.onnx")
+        if not os.path.exists(path):
+            r = requests.get(LIPSYNC_YUNET_URL, timeout=60)
+            r.raise_for_status()
+            with open(path, "wb") as f:
+                f.write(r.content)
+        yn = cv2.FaceDetectorYN.create(path, "", (W, H), 0.6, 0.3, 5000)
+    except Exception as e:
+        print(f"lip sync: YuNet not available ({e}); using the Haar face finders")
+        yn = None
+    casc = []
+    if hasattr(cv2, "CascadeClassifier"):
+        for nm in ("haarcascade_frontalface_alt2.xml", "haarcascade_frontalface_default.xml"):
+            c = cv2.CascadeClassifier(cv2.data.haarcascades + nm)
+            if not c.empty():
+                casc.append(c)
+    minsz = max(40, W // 16)
+
+    def faces(fr):
+        out = []
+        if yn is not None:
+            try:
+                yn.setInputSize((fr.shape[1], fr.shape[0]))
+                _, res = yn.detect(fr)
+                if res is not None:
+                    out = [tuple(int(v) for v in r[:4]) for r in res if r[2] >= minsz and r[3] >= minsz]
+            except Exception:
+                out = []
+        if not out and casc:
+            g = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
+            for c in casc:
+                f = c.detectMultiScale(g, 1.1, 5, minSize=(minsz, minsz))
+                if len(f):
+                    out = [tuple(int(v) for v in b) for b in f]
+                    break
+        return sorted(out, key=lambda b: b[0])
+    return faces
+
+
+def _ls_match(gen, ref):
+    """Move the colour of the new mouth patch to the colour of the original face (per channel mean / spread, in LAB)."""
+    import cv2
+    import numpy as np
+    g = cv2.cvtColor(gen, cv2.COLOR_BGR2LAB).astype(np.float32)
+    r = cv2.cvtColor(ref, cv2.COLOR_BGR2LAB).astype(np.float32)
+    for c in range(3):
+        gm, gs = g[..., c].mean(), g[..., c].std() + 1e-3
+        rm, rs = r[..., c].mean(), r[..., c].std() + 1e-3
+        g[..., c] = (g[..., c] - gm) * min(1.5, max(0.67, rs / gs)) + rm
+    return cv2.cvtColor(np.clip(g, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
+
+
+def _ls_paste(frame, box, mel16, alpha):
+    import cv2
+    import numpy as np
+    x, y, w, h = box
+    pad = int(w * 0.25)
+    x1, y1, x2, y2 = max(0, x - pad), max(0, y - pad), min(frame.shape[1], x + w + pad), min(frame.shape[0], y + h + pad)
+    if x2 - x1 < 24 or y2 - y1 < 24 or alpha <= 0:
+        return frame
+    crop = frame[y1:y2, x1:x2]
+    fh, fw = crop.shape[:2]
+    gen = cv2.resize(_ls_run(mel16, cv2.resize(crop, (96, 96), interpolation=cv2.INTER_AREA)), (fw, fh), interpolation=cv2.INTER_CUBIC)
+    gen = _ls_match(gen, crop)
+    blur = cv2.GaussianBlur(gen, (0, 0), 1.2)
+    gen = cv2.addWeighted(gen, 1.5, blur, -0.5, 0)                 # the mouth patch is soft by nature: a light sharpen
+    mask = np.zeros((fh, fw), np.float32)
+    mask[int(fh * 0.50):, int(fw * 0.12):int(fw * 0.88)] = 1.0     # lower half of the face only; eyes and brows stay as filmed
+    mask = cv2.GaussianBlur(mask, (0, 0), max(2.0, fw / 22.0)) * float(alpha)
+    res = crop.astype(np.float32) * (1 - mask[..., None]) + gen.astype(np.float32) * mask[..., None]
+    out = frame.copy()
+    out[y1:y2, x1:x2] = np.clip(res, 0, 255).astype(np.uint8)
+    return out
+
+
+def _ls_side(scene, speaker):
+    """'left' / 'right' if the scene's picture text says where the speaker stands, else None."""
+    txt = " ".join(str(scene.get(k) or "") for k in ("image_raw", "image_prompt"))
+    m = re.search(re.escape(str(speaker)) + r"\b[^.]{0,70}?\b(left|right)\b", txt, re.I)
+    return m.group(1).lower() if m else None
+
+
+def _ls_pick(faces, W, side, n_chars):
+    if not faces:
+        return None
+    if len(faces) >= 2:
+        if side == "left":
+            return faces[0]
+        if side == "right":
+            return faces[-1]
+        return None if n_chars > 1 else faces[0]
+    f = faces[0]
+    cx = f[0] + f[2] / 2.0
+    if side == "left" and cx > W * 0.58:
+        return None
+    if side == "right" and cx < W * 0.42:
+        return None
+    if side is None and n_chars > 1:
+        return None
+    return f
+
+
+def lipsync_scene(clip_path, scene, parts, duration, scene_audio_path, tmp, scene_num):
+    """parts: [{'dur': seconds, 'speaker': 'ADA', 'talk': True/False}] in playing order (the scene audio is exactly these joined).
+    Returns the path of the lip-synced clip (already fitted to the scene length), or clip_path unchanged."""
+    import cv2
+    import numpy as np
+    wins, t = [], 0.0
+    for p in parts:
+        wins.append({"s": t, "e": t + p["dur"], "who": str(p.get("speaker") or ""), "talk": bool(p.get("talk"))})
+        t += p["dur"]
+    if not any(w["talk"] for w in wins):
+        return clip_path
+    n_chars = len(scene.get("scene_characters") or [])
+    # 1) fit the clip to the scene exactly as build_clip_segment will (speed / slow), so the audio lines up frame by frame
+    clip_dur = probe_duration(clip_path)
+    speed = min(CLIP_SPEEDUP, max(clip_dur / duration, 0.88)) if clip_dur > 0 else 1.0
+    fitted = clip_dur / speed
+    vf = f"setpts=PTS/{speed:.4f},fps={FPS}"
+    if fitted < duration:
+        vf += f",tpad=stop_mode=clone:stop_duration={duration - fitted + 0.5:.3f}"
+    base = os.path.join(tmp, f"s{scene_num}_ls_base.mp4")
+    run(["ffmpeg", "-y", "-i", clip_path, "-an", "-vf", vf, "-t", f"{duration:.3f}", "-c:v", "libx264", "-preset", "veryfast",
+         "-crf", "14", "-pix_fmt", "yuv420p", base])
+    wav = os.path.join(tmp, f"s{scene_num}_ls.wav")
+    run(["ffmpeg", "-y", "-i", scene_audio_path, "-ar", "16000", "-ac", "1", wav])
+    mel = _ls_mel(wav)
+    cap = cv2.VideoCapture(base)
+    W, H = int(cap.get(3)), int(cap.get(4))
+    faces = _ls_detector(W, H)
+    raw = os.path.join(tmp, f"s{scene_num}_ls_raw.mp4")
+    vw = cv2.VideoWriter(raw, cv2.VideoWriter_fourcc(*"mp4v"), FPS, (W, H))
+    smooth, i, talk_frames, done_frames = {}, 0, 0, 0
+    sides = {w["who"]: _ls_side(scene, w["who"]) for w in wins if w["talk"]}
+    while True:
+        ok, fr = cap.read()
+        if not ok:
+            break
+        tt = i / float(FPS)
+        w = next((x for x in wins if x["s"] <= tt < x["e"]), None)
+        if w and w["talk"]:
+            talk_frames += 1
+            alpha = max(0.0, min(1.0, (tt - w["s"]) / LIPSYNC_RAMP, (w["e"] - tt) / LIPSYNC_RAMP))
+            box = _ls_pick(faces(fr), W, sides.get(w["who"]), n_chars)
+            if box is not None:
+                prev = smooth.get(w["who"])
+                box = tuple(int(0.6 * a + 0.4 * b) for a, b in zip(prev, box)) if prev else box     # steady box: no mouth jitter
+                smooth[w["who"]] = box
+                st = int(tt * 80)
+                chunk = mel[:, st:st + 16]
+                if chunk.shape[1] < 16:
+                    chunk = np.pad(mel, ((0, 0), (0, 16)), mode="edge")[:, -16:] if mel.shape[1] < 16 else mel[:, -16:]
+                fr = _ls_paste(fr, box, chunk, alpha)
+                done_frames += 1
+        vw.write(fr)
+        i += 1
+    vw.release()
+    cap.release()
+    share = (done_frames / talk_frames) if talk_frames else 0.0
+    print(f"scene {scene_num}: lip sync on {done_frames}/{talk_frames} speaking frames")
+    if share < LIPSYNC_MIN_SHARE:
+        print(f"::warning::scene {scene_num}: no usable speaker face (side-on, too small, or not found) - lip sync skipped for this scene")
+        return clip_path
+    out = os.path.join(tmp, f"s{scene_num}_clip_ls.mp4")
+    run(["ffmpeg", "-y", "-i", raw, "-c:v", "libx264", "-preset", "veryfast", "-crf", "15", "-pix_fmt", "yuv420p", "-an", out])
+    return out
+
+
 def master_audio_and_music(final_path, out_path):
     """Level the narration, duck background music under it, and add faststart."""
     total = probe_duration(final_path)
@@ -1003,10 +1266,12 @@ def main():
                 print(f"--- scene {scene_num} ---")
 
                 audio_parts = []
+                parts_info = []
                 for j, asset in enumerate(voice_by_scene.get(scene_num, [])):
                     part_path = os.path.join(tmp, f"s{scene_num}_line{j}.mp3")
                     download(asset["file_url"], part_path)
                     audio_parts.append(part_path)
+                    parts_info.append({"line_index": asset["line_index"], "path": part_path})
 
                 scene_audio_path = os.path.join(tmp, f"s{scene_num}_audio.wav")
                 if audio_parts:
@@ -1056,7 +1321,19 @@ def main():
                             except Exception as e:
                                 print(f"::warning::scene {scene_num}: soft join skipped ({e})")
                                 next_frame = None
-                        build_clip_segment(i, clip_path, scene_audio_path, duration, sub_text, tmp, segment_path, next_frame)
+                        use_clip = clip_path
+                        if LIPSYNC_ENABLED and parts_info:
+                            try:
+                                by_idx = {l["line_index"]: l for l in lines_by_scene.get(scene_num, [])}
+                                parts = []
+                                for pi in parts_info:
+                                    spk = str((by_idx.get(pi["line_index"]) or {}).get("speaker") or "")
+                                    parts.append({"dur": probe_duration(pi["path"]), "speaker": spk, "talk": bool(spk) and spk.upper() != "NARRATOR"})
+                                use_clip = lipsync_scene(clip_path, scene, parts, duration, scene_audio_path, tmp, scene_num)
+                            except Exception as e:
+                                print(f"::warning::scene {scene_num}: lip sync skipped ({e})")
+                                use_clip = clip_path
+                        build_clip_segment(i, use_clip, scene_audio_path, duration, sub_text, tmp, segment_path, next_frame)
                         built = True
                         print(f"scene {scene_num}: built from the animated clip")
                     except Exception as e:
