@@ -43,7 +43,7 @@ ZOOM_AMOUNT = 0.06          # how far the slow zoom goes (0.06 = 6%; was 12% and
 HEAD_SAFE = 0.28            # 0.5 = zoom into the centre; smaller keeps the TOP of the picture (heads) and crops the bottom more
 FADE_SECONDS = 0.30         # fade in/out at the start/end of each STILL-IMAGE scene (animated clips cut straight, like a real film)
 CLIP_SCENE_TAIL_SECONDS = 0.12  # v66: pause after the voice in an ANIMATED scene (stills keep SCENE_TAIL_SECONDS). A long silent pause with a frozen picture was the 'hiccup' between scenes.
-CLIP_SPEEDUP = 1.25         # v67: animated clips play up to 25% faster (never more than 12% slower), fitted to the voice so nothing freezes
+CLIP_SPEEDUP = 1.5         # v67: animated clips play up to 25% faster (never more than 12% slower), fitted to the voice so nothing freezes
 CLIP_MAX_STRETCH = 1.20     # v66: a clip a little shorter than its voice is slowed by up to 20% to fill the scene (almost unnoticeable) instead of freezing on its last frame
 CLIP_JOIN_BLEND = 0.30     # v65: seconds. The end of an animated scene melts into the FIRST picture of the next animated scene, so the cut has no jump (0 = off). No black, no length change.
 CLIP_SCENE_FADES = False    # True = animated clips fade in/out too
