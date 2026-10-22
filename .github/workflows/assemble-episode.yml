@@ -24,7 +24,12 @@ jobs:
           python-version: '3.11'
 
       - name: Install ffmpeg and fonts
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+        run: |
+          for i in 1 2 3; do
+            if sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 update && timeout 180 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 install -y --no-install-recommends ffmpeg fonts-dejavu-core; then break; fi
+            echo "install attempt $i failed, trying again"; sleep 5
+          done
+          ffmpeg -version | head -1
 
       - name: Install Python dependencies
         run: pip install requests
