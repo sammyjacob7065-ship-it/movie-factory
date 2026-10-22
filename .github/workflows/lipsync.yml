@@ -1,0 +1,29 @@
+name: lipsync
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:    { description: "job id", required: true }
+      video_url: { description: "close-up video url", required: true }
+      audio_url: { description: "voice url", required: true }
+      sb_key:    { description: "storage key", required: true }
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install kaggle
+      - name: Hide key in logs
+        run: echo "::add-mask::${{ inputs.sb_key }}"
+      - name: Push job to Kaggle
+        env:
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+          JOB_ID: ${{ inputs.job_id }}
+          VIDEO_URL: ${{ inputs.video_url }}
+          AUDIO_URL: ${{ inputs.audio_url }}
+          SB_URL: "https://njijwtcamdsorymzanpj.supabase.co"
+          SB_KEY: ${{ inputs.sb_key }}
+          SB_BUCKET: "betrayer-assets"
+        run: python scripts/lipsync_push.py
