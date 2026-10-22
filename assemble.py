@@ -52,6 +52,14 @@ SUB_FONT_SIZE = 46
 SUB_WRAP_CHARS = 46         # characters per subtitle line (horizontal film)
 SUB_CHUNK_CHARS = 92        # characters per subtitle screen (about 2 lines)
 SUB_BOTTOM_MARGIN = 90      # pixels from the bottom
+# v70: SHORTS CAPTIONS (vertical 9:16 films only): big bold words, 2-3 words at a time, centred in the safe zone, colours alternate white / yellow
+SHORTS_CAPTIONS = True      # False = the older small subtitles also in vertical films
+SHORTS_WORDS = 3            # most words on screen at once
+SHORTS_MAX_CHARS = 20       # a caption never gets longer than this many letters
+SHORTS_WRAP = 12            # letters per line before the caption breaks into two lines
+SHORTS_FONT_SIZE = 104
+SHORTS_Y = 0.60             # centre of the captions, as a share of the picture height (the bottom 20% is covered by the TikTok/Shorts buttons)
+SHORTS_COLORS = ["white", "0xFFD400", "white", "0x00E5FF"]
 
 # ---- BRAND WATERMARK (edit here) ----
 WATERMARK_TEXT = "Sammys_galories"   # "" = no watermark
@@ -437,10 +445,60 @@ def split_subtitle_chunks(text):
     return chunks
 
 
+def shorts_caption_filters(text, duration, tmp, tag):
+    """v70: eye-catching short-video captions. Words are shown 2-3 at a time in big heavy capitals with a thick black outline.
+    The time of each caption is shared out by its number of letters over the spoken part of the scene."""
+    words = [re.sub(r'["\u201c\u201d]', "", w).upper() for w in re.sub(r"\s+", " ", text or "").strip().split(" ")]
+    words = [w for w in words if w.strip()]
+    if not words:
+        return []
+    chunks, cur = [], []
+    for w in words:
+        if cur and len(" ".join(cur + [w])) > SHORTS_MAX_CHARS:
+            chunks.append(cur); cur = []
+        cur.append(w)
+        if len(cur) >= SHORTS_WORDS or re.search(r"[.!?,;:]$", w):
+            chunks.append(cur); cur = []
+    if cur:
+        chunks.append(cur)
+    labels = [" ".join(c).rstrip(".,;:") for c in chunks]
+    speech = max(duration - SCENE_TAIL_SECONDS, 0.5)
+    weights = [len(l) + 3 for l in labels]
+    total = float(sum(weights)) or 1.0
+    fontfile = os.path.join(tmp, "title_font.otf")
+    if not os.path.exists(fontfile):
+        fontfile = _title_font_file(tmp)[0]
+    t, out = 0.0, []
+    for k, label in enumerate(labels):
+        span = speech * weights[k] / total
+        start, end = t, t + span
+        t = end
+        tf = os.path.join(tmp, f"{tag}_cap{k}.txt")
+        with open(tf, "w", encoding="utf-8") as f:
+            f.write("\n".join(textwrap.wrap(label, width=SHORTS_WRAP)))
+        parts = []
+        if fontfile:
+            parts.append(f"fontfile={fontfile}")
+        parts += [
+            f"textfile={tf}", "expansion=none",
+            f"fontcolor={SHORTS_COLORS[k % len(SHORTS_COLORS)]}",
+            f"fontsize={SHORTS_FONT_SIZE}",
+            "borderw=11", "bordercolor=black",
+            "shadowx=0", "shadowy=7", "shadowcolor=black@0.6",
+            "line_spacing=-6",
+            "x=(w-text_w)/2", f"y=h*{SHORTS_Y}-text_h/2",
+            f"enable='between(t,{start:.3f},{end:.3f})'",
+        ]
+        out.append("drawtext=" + ":".join(parts))
+    return out
+
+
 def subtitle_filters(text, duration, tmp, tag):
     """Return a list of drawtext filters, each shown only during its time slot."""
     if not SUBTITLES:
         return []
+    if SHORTS_CAPTIONS and HEIGHT > WIDTH:
+        return shorts_caption_filters(text, duration, tmp, tag)
     chunks = split_subtitle_chunks(text)
     if not chunks:
         return []
