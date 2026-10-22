@@ -1,7 +1,12 @@
-import os, sys, json, subprocess, time, pathlib
-job = {"job_id": os.environ["JOB_ID"], "video_url": os.environ["VIDEO_URL"], "audio_url": os.environ["AUDIO_URL"],
-       "steps": int(os.environ.get("STEPS", "20")), "guide": float(os.environ.get("GUIDE", "2.0"))}
-user = os.environ["KAGGLE_USERNAME"]
+import os, sys, json, subprocess, pathlib
+jobs = os.environ.get("JOBS_JSON", "").strip()
+job = json.loads(jobs) if jobs else {"video_url": os.environ["VIDEO_URL"], "audio_url": os.environ["AUDIO_URL"]}
+job["job_id"] = os.environ["JOB_ID"]
+job.setdefault("steps", int(os.environ.get("STEPS", "20")))
+job.setdefault("guide", float(os.environ.get("GUIDE", "2.0")))
+user = os.environ.get("KAGGLE_USERNAME", "").strip()
+if not user or " " in user or "@" in user:
+    sys.exit("KAGGLE_USERNAME secret is empty or wrong. It must be your Kaggle username (from kaggle.com/yourusername), not your email.")
 tpl = pathlib.Path("kaggle/lipsync_kernel.py").read_text()
 code = (tpl.replace("__JOB__", json.dumps(job))
            .replace("__SBURL__", os.environ["SB_URL"]).replace("__SBKEY__", os.environ["SB_KEY"])
