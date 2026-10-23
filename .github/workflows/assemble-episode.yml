@@ -23,12 +23,27 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install ffmpeg and fonts
+      - name: Install ffmpeg and fonts (apt)
+        id: apt_ffmpeg
+        continue-on-error: true
         run: |
           for i in 1 2 3; do
-            if sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 update && timeout 180 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 install -y --no-install-recommends ffmpeg fonts-dejavu-core; then break; fi
-            echo "install attempt $i failed, trying again"; sleep 5
+            if sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 update && timeout 300 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 install -y --no-install-recommends ffmpeg fonts-dejavu-core; then break; fi
+            echo "install attempt $i failed, trying again"; sleep 10
           done
+          if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+            echo "ffmpeg/ffprobe NOT installed by apt"
+            exit 1
+          fi
+
+      - name: Fallback ffmpeg (only runs if apt failed)
+        if: steps.apt_ffmpeg.outcome == 'failure'
+        uses: FedericoCarboni/setup-ffmpeg@v3
+
+      - name: Check ffmpeg is really available
+        run: |
+          command -v ffmpeg
+          command -v ffprobe
           ffmpeg -version | head -1
 
       - name: Install Python dependencies
