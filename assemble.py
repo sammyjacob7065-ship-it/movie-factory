@@ -1038,7 +1038,7 @@ def main():
         # subtitle layout for each shape: (characters per line, characters per screen, bottom margin, font size)
         SUB_WRAP_CHARS, SUB_CHUNK_CHARS, SUB_BOTTOM_MARGIN, SUB_FONT_SIZE = {
             "16:9": (46, 92, 90, 46), "9:16": (26, 52, 300, 52), "4:3": (38, 76, 100, 46), "1:1": (32, 64, 140, 46)}[_asp]
-    SUBTITLES = manifest.get("subtitles", True) is not False
+        SUBTITLES = manifest.get("subtitles", True) is not False or _asp == "9:16"   # vertical films always get the CapCut-style captions
     print(f"Output {WIDTH}x{HEIGHT}, subtitles {'on' if SUBTITLES else 'off'}")
     episode_id = manifest["episodeId"]
 
