@@ -23,28 +23,41 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install ffmpeg and fonts (apt)
-        id: apt_ffmpeg
-        continue-on-error: true
+      # ffmpeg comes from a prebuilt static download on GitHub (about 10 seconds).
+      # apt is only the fallback, with one short attempt, so a slow Ubuntu mirror can never stall the job again.
+      - name: Install ffmpeg
         run: |
-          for i in 1 2 3; do
-            if sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 update && timeout 300 sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 install -y --no-install-recommends ffmpeg fonts-dejavu-core; then break; fi
-            echo "install attempt $i failed, trying again"; sleep 10
-          done
+          set -u
           if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
-            echo "ffmpeg/ffprobe NOT installed by apt"
-            exit 1
+            URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
+            ok=0
+            for i in 1 2 3; do
+              if curl -fsSL --retry 3 --retry-delay 3 --connect-timeout 20 --max-time 240 -o "$RUNNER_TEMP/ffmpeg.tar.xz" "$URL"; then ok=1; break; fi
+              echo "static ffmpeg download attempt $i failed, trying again"; sleep 5
+            done
+            if [ "$ok" = "1" ]; then
+              mkdir -p "$RUNNER_TEMP/ffmpeg-static"
+              tar -xJf "$RUNNER_TEMP/ffmpeg.tar.xz" -C "$RUNNER_TEMP/ffmpeg-static"
+              sudo cp "$RUNNER_TEMP"/ffmpeg-static/*/bin/ffmpeg "$RUNNER_TEMP"/ffmpeg-static/*/bin/ffprobe /usr/local/bin/
+            else
+              echo "static download failed, falling back to apt (one short attempt)"
+              timeout 120 sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 update || true
+              timeout 240 sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 install -y --no-install-recommends ffmpeg || true
+            fi
           fi
-
-      - name: Fallback ffmpeg (only runs if apt failed)
-        if: steps.apt_ffmpeg.outcome == 'failure'
-        uses: FedericoCarboni/setup-ffmpeg@v3
-
-      - name: Check ffmpeg is really available
-        run: |
-          command -v ffmpeg
-          command -v ffprobe
+          command -v ffmpeg && command -v ffprobe || { echo "ffmpeg/ffprobe NOT installed"; exit 1; }
           ffmpeg -version | head -1
+
+      # The caption/watermark font. Most runners already have it; if not, try apt briefly and carry on either way.
+      - name: Make sure a caption font exists
+        run: |
+          if [ -f /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf ] || [ -f /usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf ] || [ -f /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf ]; then
+            echo "font already present"
+          else
+            echo "no font found, trying apt (short)"
+            timeout 90 sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 update || true
+            timeout 120 sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 install -y --no-install-recommends fonts-dejavu-core || echo "WARNING: could not install a font, captions may be missing"
+          fi
 
       - name: Install Python dependencies
         run: pip install requests
