@@ -4,10 +4,10 @@ Runs on GitHub Actions. n8n sends the order (JOB_JSON) and polls clips/<jobId>.j
 import os, sys, json, re, subprocess, shutil, tempfile, time, glob
 import requests
 
-SB_URL = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
-SB_KEY = os.environ.get("SUPABASE_SERVICE_KEY") or ""
-BUCKET = os.environ.get("SUPABASE_BUCKET") or "betrayer-assets"
-GROQ_KEY = os.environ.get("GROQ_API_KEY") or ""
+SB_URL = (os.environ.get("SUPABASE_URL") or "").strip().rstrip("/")
+SB_KEY = (os.environ.get("SUPABASE_SERVICE_KEY") or "").strip()
+BUCKET = (os.environ.get("SUPABASE_BUCKET") or "").strip() or "betrayer-assets"
+GROQ_KEY = (os.environ.get("GROQ_API_KEY") or "").strip()
 GROQ_LLM = "openai/gpt-oss-120b"
 GROQ_STT = "whisper-large-v3-turbo"
 FONT_CANDIDATES = [
@@ -249,6 +249,53 @@ def discover(topics, cc_only, tmp):
                 print("::warning::could not save used list", e)
             return "https://www.youtube.com/watch?v=" + v["id"], v.get("title") or ""
     raise RuntimeError("found no new long video for these topics. Add more topics or turn off 'Creative Commons only'.")
+
+
+def _secs(v):
+    try:
+        v = str(v)
+        if ":" in v:
+            p = [float(x) for x in v.split(":")]
+            return sum(x * 60 ** i for i, x in enumerate(reversed(p)))
+        return float(v)
+    except Exception:
+        return 0.0
+
+
+def discover_archive(topics, tmp):
+    """Archive.org: free reusable (Creative Commons / public domain) videos, direct links, no YouTube blocking"""
+    import random
+    from urllib.parse import quote
+    used = (sb_get_json("clips/used.json") or {}).get("ids", [])
+    topics = list(topics) or ["speech"]
+    random.shuffle(topics)
+    for topic in topics:
+        q = f"({topic}) AND mediatype:movies AND (licenseurl:*creativecommons* OR licenseurl:*publicdomain*)"
+        try:
+            r = requests.get("https://archive.org/advancedsearch.php", params={"q": q, "fl[]": ["identifier", "title"], "rows": 40, "output": "json"}, timeout=60)
+            docs = r.json()["response"]["docs"]
+        except Exception as e:
+            print("archive search failed", topic, str(e)[:200])
+            continue
+        random.shuffle(docs)
+        for d in docs[:12]:
+            ident = d["identifier"]
+            if ident in used:
+                continue
+            try:
+                m = requests.get(f"https://archive.org/metadata/{ident}", timeout=60).json()
+            except Exception:
+                continue
+            for f in m.get("files", []):
+                name = f.get("name", "")
+                if name.lower().endswith((".mp4", ".m4v")) and 600 <= _secs(f.get("length")) <= 7200:
+                    used.append(ident)
+                    try:
+                        sb_put("clips/used.json", json.dumps({"ids": used[-500:]}).encode(), "application/json")
+                    except Exception as e:
+                        print("::warning::could not save used list", e)
+                    return f"https://archive.org/download/{ident}/{quote(name)}", d.get("title") or ident
+    raise RuntimeError("found no new long video on Archive.org for these topics. Add more topics.")
 
 # ---------------------------------------------------------------- pick the moment
 def pick_moment(segs, hint, short):
@@ -590,35 +637,54 @@ def main():
     tmp = tempfile.mkdtemp(prefix="clip_")
     try:
         status("start", "Job started")
-        if not url:
-            status("search", "Looking for a long video")
-            url, _t = discover(JOB.get("topics") or [], bool(JOB.get("ccOnly", True)), tmp)
-            print("chosen video:", url, _t)
-        info = source_info(url, tmp)
-        total = info["duration"]
-        s, e = JOB.get("start"), JOB.get("end")
-        picked_title = ""
-        if s is None or e is None:
-            limit = min(total or scan_min * 60, scan_min * 60)
-            status("transcript", f"Reading the first {int(limit // 60)} minutes of the video")
-            segs = subs_transcript(url, tmp, limit)
-            if len(segs) < 5:
-                if not GROQ_KEY:
-                    raise RuntimeError("GROQ_API_KEY secret is missing")
-                segs = audio_transcript(url, tmp, limit)
-            if not segs:
-                raise RuntimeError("could not read the video's speech. Give a start and end time instead.")
-            status("pick", "Choosing the best moment")
-            s, e, picked_title, why = pick_moment(segs, hint, short)
-            print("picked", s, e, why)
-        s, e = float(s), float(e)
-        if total and e > total:
-            e = total
-        if e - s < 5:
-            raise RuntimeError("the clip is shorter than 5 seconds. Check the start and end times.")
-        dur = e - s
-        status("download", f"Cutting {fmt_t(s)} to {fmt_t(e)}")
-        src, offset = cut_section(url, s, e, tmp, total)
+        sources = ["given"] if url else (JOB.get("sources") or ["youtube", "archive"])
+        errs = []
+        url0 = url
+        for srcname in sources:
+            try:
+                if srcname == "given":
+                    u = url0
+                else:
+                    status("search", f"Looking for a long video ({srcname})")
+                    if srcname == "archive":
+                        u, _t = discover_archive(JOB.get("topics") or [], tmp)
+                    else:
+                        u, _t = discover(JOB.get("topics") or [], bool(JOB.get("ccOnly", True)), tmp)
+                    print("chosen video:", u, _t)
+                info = source_info(u, tmp)
+                total = info["duration"]
+                s, e = JOB.get("start"), JOB.get("end")
+                picked_title = ""
+                if s is None or e is None:
+                    limit = min(total or scan_min * 60, scan_min * 60)
+                    status("transcript", f"Reading the first {int(limit // 60)} minutes of the video")
+                    segs = subs_transcript(u, tmp, limit) if not is_direct(u) else []
+                    if len(segs) < 5:
+                        if not GROQ_KEY:
+                            raise RuntimeError("GROQ_API_KEY secret is missing")
+                        segs = audio_transcript(u, tmp, limit)
+                    if not segs:
+                        raise RuntimeError("could not read the video's speech. Give a start and end time instead.")
+                    status("pick", "Choosing the best moment")
+                    s, e, picked_title, why = pick_moment(segs, hint, short)
+                    print("picked", s, e, why)
+                s, e = float(s), float(e)
+                if total and e > total:
+                    e = total
+                if e - s < 5:
+                    raise RuntimeError("the clip is shorter than 5 seconds. Check the start and end times.")
+                dur = e - s
+                status("download", f"Cutting {fmt_t(s)} to {fmt_t(e)}")
+                src, offset = cut_section(u, s, e, tmp, total)
+                url = u
+                break
+            except Exception as ex:
+                errs.append(f"{srcname}: {str(ex)[:300]}")
+                print("::warning::source failed ->", errs[-1], flush=True)
+                if srcname == "given":
+                    raise
+        else:
+            raise RuntimeError(" | ".join(errs))
 
         status("captions", "Listening to the clip for captions")
         ca = os.path.join(tmp, "clip_audio.mp3")
