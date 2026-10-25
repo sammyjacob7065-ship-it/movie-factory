@@ -182,7 +182,14 @@ def audio_transcript(url, tmp, limit_s):
         "-c", "copy", pat])
     segs = []
     for i, p in enumerate(sorted(glob.glob(os.path.join(tmp, "scan_0*.mp3")))):
-        s, _ = groq_whisper(p)
+        try:
+            if os.path.getsize(p) < 4000 or audio_len(p) < 1.0:
+                continue  # tiny leftover piece at the end
+            s, _ = groq_whisper(p)
+        except Exception as ex:
+            if "too short" in str(ex).lower():
+                continue
+            raise
         for x in s:
             segs.append({"start": x["start"] + i * 600, "end": x["end"] + i * 600, "text": x["text"]})
     return segs
@@ -637,7 +644,7 @@ def main():
     tmp = tempfile.mkdtemp(prefix="clip_")
     try:
         status("start", "Job started")
-        sources = ["given"] if url else (JOB.get("sources") or ["youtube", "archive"])
+        sources = ["given"] if url else (JOB.get("sources") or ["youtube", "archive", "archive", "archive"])
         errs = []
         url0 = url
         for srcname in sources:
