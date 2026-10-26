@@ -72,15 +72,15 @@ SFX_ENABLED = True          # the film's sound effects (planned from the script 
 SFX_ONCE_REL_DB = -7.0      # loudness of a single event (explosion, door slam) compared with the narration
 SFX_REPEAT_REL_DB = -10.0   # repeated hits (fight blows, sword clashes, knocks)
 SFX_BED_REL_DB = -16.0      # continuous beds (engine, footsteps, rain, crowd) sit well under the voice
-SFX_MUSIC_REL_DB = -14.0    # slow background music under the narration (was -21: too quiet to hear on a phone)
-SFX_MUSIC_DUCK_RATIO = 3.0  # music dips while the narrator speaks (was 6: it almost disappeared)
+SFX_MUSIC_REL_DB = -11.0    # slow background music under the narration (was -21: too quiet to hear on a phone)
+SFX_MUSIC_DUCK_RATIO = 2.0  # music dips while the narrator speaks (was 6: it almost disappeared)
 MUSIC_DIR = "assets/music"  # optional: put calm.mp3, sad.mp3, tense.mp3, mysterious.mp3, hopeful.mp3 here for real tracks;
                             # a mood without a file gets a slow generated pad instead
 SKIP_DEFAULT_MUSIC = False  # set to True automatically when the film has its own planned music
 SFX_DUCK_RATIO = 2.5        # effects dip a little while the narrator speaks (1 = no dipping)
 SFX_MAX_EVENTS = 120        # most hits one repeating cue may place
 MUSIC_PATH = "assets/music/default.mp3"
-MUSIC_VOLUME = 0.5          # before ducking; it dips automatically under the voice (was 0.25: too quiet)
+MUSIC_VOLUME = 0.6          # before ducking; it dips automatically under the voice (was 0.25: too quiet)
 VIDEO_CRF = 23              # lower = better quality, bigger file
 VIDEO_MAXRATE = "3M"        # caps file size
 CLIP_FILL_MODE = "hold"     # clip shorter than the scene's voice: "hold" its last frame (v64: never "loop" - looping made an action play twice)
