@@ -80,7 +80,7 @@ SKIP_DEFAULT_MUSIC = False  # set to True automatically when the film has its ow
 SFX_DUCK_RATIO = 2.5        # effects dip a little while the narrator speaks (1 = no dipping)
 SFX_MAX_EVENTS = 120        # most hits one repeating cue may place
 MUSIC_PATH = "assets/music/default.mp3"
-MUSIC_VOLUME = 15          # before ducking; it dips automatically under the voice (was 0.25: too quiet)
+MUSIC_VOLUME = 11          # before ducking; it dips automatically under the voice (was 0.25: too quiet)
 VIDEO_CRF = 23              # lower = better quality, bigger file
 VIDEO_MAXRATE = "3M"        # caps file size
 CLIP_FILL_MODE = "hold"     # clip shorter than the scene's voice: "hold" its last frame (v64: never "loop" - looping made an action play twice)
