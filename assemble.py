@@ -64,9 +64,9 @@ _CAP_ADV = {"A":764,"B":650,"C":730,"D":711,"E":632,"F":605,"G":740,"H":727,"I":
 _CAP_KERN = {"AA":15,"AC":-49,"AG":-48,"AO":-49,"AQ":-49,"AS":-28,"AT":-97,"AU":-49,"AV":-117,"AW":-112,"AY":-107,"A0":-39,"A1":-117,"A6":-39,"A'":-79,"A?":-62,"A-":-34,"BT":-19,"CA":-35,"CX":-23,"DA":-49,"DT":-34,"DV":-54,"DW":-39,"DX":-68,"DY":-48,"FA":-91,"FJ":-67,"GA":-39,"GT":-31,"GV":-22,"GX":-22,"GY":-33,"JA":-48,"KC":-64,"KG":-63,"KO":-63,"KQ":-63,"KS":-44,"K-":-51,"LC":-29,"LG":-28,"LO":-28,"LQ":-28,"LT":-86,"LV":-85,"LW":-68,"LY":-131,"L1":-45,"L'":-90,"L-":-51,"OA":-49,"OT":-33,"OV":-54,"OW":-39,"OX":-68,"OY":-48,"PA":-91,"PJ":-96,"P&":-34,"QA":-49,"QT":-33,"QV":-54,"QW":-39,"QX":-68,"QY":-48,"RC":-6,"RT":-25,"RV":-23,"RY":-34,"SA":-28,"SX":-34,"S7":-14,"TA":-97,"TC":-34,"TG":-33,"TJ":-90,"TO":-33,"TQ":-33,"T0":-34,"T4":-67,"T6":-34,"T7":-79,"T&":-34,"T-":-78,"UA":-49,"VA":-117,"VC":-54,"VG":-53,"VJ":-96,"VO":-54,"VQ":-54,"VV":15,"V0":-54,"V4":-33,"V6":-54,"V&":-51,"V-":-63,"WA":-112,"WC":-39,"WG":-39,"WJ":-62,"WO":-39,"WQ":-39,"WS":-11,"WW":20,"W4":-33,"W&":-51,"W-":-34,"XC":-69,"XG":-68,"XO":-68,"XQ":-68,"XS":-34,"X0":-49,"X3":-24,"X4":-39,"X6":-49,"X8":-25,"X-":-45,"YA":-107,"YC":-49,"YG":-48,"YJ":-33,"YO":-48,"YQ":-48,"Y4":-67,"Y&":-62,"Y-":-50,"ZC":-34,"ZG":-33,"ZO":-33,"ZQ":-33,"Z-":-33,"0A":-39,"0V":-54,"0X":-49,"0Y":-34,"07":-20,"24":-15,"3X":-24,"4A":-9,"41":-63,"47":-58,"51":-20,"7A":-108,"7J":-96,"70":-16,"73":-17,"74":-58,"75":-10,"76":-16,"77":20,"78":-14,"79":-10,"7&":-46,"8X":-25,"9A":-39,"9V":-54,"9X":-49,"9Y":-34,"97":-20,"'A":-79,"'J":-164,"'4":-62,"'&":-34,"?A":-62,"&T":-57,"&V":-63,"&W":-40,"&Y":-74,"&'":-34,"-A":-34,"-J":-45,"-T":-78,"-V":-40,"-W":-34,"-X":-45,"-Y":-50,"-2":-11,"-7":-34}
 
 # ---- BRAND WATERMARK (edit here) ----
-WATERMARK_TEXT = "Sammys_galories"   # "" = no watermark
+WATERMARK_TEXT = "SAMSON_SET"   # "" = no watermark
 WATERMARK_OPACITY = 0.40            # 0.0 invisible ... 1.0 solid; 0.35-0.5 looks professional
-WATERMARK_SIZE = 0.028              # letter height as a share of the short side of the frame (0.028 = small)
+WATERMARK_SIZE = 0.035              # letter height as a share of the short side of the frame (0.028 = small)
 WATERMARK_POSITION = "top-right"    # top-right, top-left, bottom-right or bottom-left
 SFX_ENABLED = True          # the film's sound effects (planned from the script by the "sound supervisor" in n8n) are mixed in
 SFX_ONCE_REL_DB = -7.0      # loudness of a single event (explosion, door slam) compared with the narration
@@ -80,7 +80,7 @@ SKIP_DEFAULT_MUSIC = False  # set to True automatically when the film has its ow
 SFX_DUCK_RATIO = 2.5        # effects dip a little while the narrator speaks (1 = no dipping)
 SFX_MAX_EVENTS = 120        # most hits one repeating cue may place
 MUSIC_PATH = "assets/music/default.mp3"
-MUSIC_VOLUME = 11          # before ducking; it dips automatically under the voice (was 0.25: too quiet)
+MUSIC_VOLUME = 8          # before ducking; it dips automatically under the voice (was 0.25: too quiet)
 VIDEO_CRF = 23              # lower = better quality, bigger file
 VIDEO_MAXRATE = "3M"        # caps file size
 CLIP_FILL_MODE = "hold"     # clip shorter than the scene's voice: "hold" its last frame (v64: never "loop" - looping made an action play twice)
