@@ -610,6 +610,81 @@ def watermark_filter():
     return ["drawtext=" + ":".join(parts)]
 
 
+# ---- HOOK TEXT (optional, added): one complete title line on the first scene, separate from the karaoke captions ----
+HOOK_STATE = {"hook": None}   # set per scene in main(); None = this scene has no hook, nothing is drawn
+HOOK_COLOR = "0xFFD400"       # highlighted words (yellow, same as the caption box)
+HOOK_TEXT_COLOR = "white"
+HOOK_MAX_WIDTH = 0.86         # share of the picture width the hook may use
+HOOK_MAX_LINES = 3
+HOOK_START_SIZE = 0.115       # first font size tried, as a share of the picture width (shrinks until it fits)
+HOOK_Y = {"top": 0.16, "upper-middle": 0.27, "center": 0.42}   # centre of the hook as a share of the picture height
+
+
+def hook_filters(tmp, tag):
+    """drawtext filters for this scene's hook (HOOK_STATE). Returns [] when the scene has no hook or anything goes wrong,
+    so a hook can never stop a film from being built."""
+    try:
+        h = HOOK_STATE.get("hook")
+        if not h or not str(h.get("text") or "").strip():
+            return []
+        text = re.sub(r"\s+", " ", str(h["text"]).replace("\u2019", "'")).strip().upper()   # the embedded poster font has capitals only
+        words = [w for w in (re.sub(r"[^A-Z0-9'!?&.,:\-]", "", t) for t in text.split(" ")) if w]
+        if not words:
+            return []
+        hi = set(re.sub(r"[^A-Z0-9']", "", t.upper()) for t in re.split(r"[\s,;]+", str(h.get("highlight") or "")))
+        hi.discard("")
+        fontfile, embedded = _title_font_file(tmp)
+        _hw = (lambda w, sz: _text_width(w, sz, True)) if embedded else (lambda w, sz: len(w) * sz * 0.80)   # exact letter widths with the embedded font, a wide safe guess with a fallback font
+        max_px = WIDTH * HOOK_MAX_WIDTH
+        size = int(WIDTH * HOOK_START_SIZE)
+        while True:
+            gap = size * 0.2
+            lines, cur, cur_w = [], [], 0.0
+            for w in words:
+                ww = _hw(w, size)
+                add = ww if not cur else gap + ww
+                if cur and cur_w + add > max_px:
+                    lines.append(cur); cur, cur_w = [w], ww
+                else:
+                    cur.append(w); cur_w += add
+            if cur:
+                lines.append(cur)
+            fits = all(_hw(w, size) <= max_px for w in words)
+            if (len(lines) <= HOOK_MAX_LINES and fits) or size <= 56:
+                break
+            size -= 4
+        cap_h = size * 0.73
+        pitch = size * 1.14
+        block_h = (len(lines) - 1) * pitch + cap_h
+        cy = HEIGHT * HOOK_Y.get(str(h.get("position") or "upper-middle").strip().lower(), HOOK_Y["upper-middle"])
+        top = cy - block_h / 2.0
+        dm = re.match(r"^\s*(\d+(?:\.\d+)?)\s*s?\s*$", str(h.get("duration") or ""))
+        enable = [f"enable='between(t,0,{float(dm.group(1)):.2f})'"] if dm else []   # a number = that many seconds; otherwise the whole scene
+        bw = max(6, int(size * 0.09))
+        out = []
+        for li, line in enumerate(lines):
+            widths = [_hw(w, size) for w in line]
+            x = (WIDTH - (sum(widths) + gap * (len(line) - 1))) / 2.0
+            y = top + li * pitch
+            for wi, (w, ww) in enumerate(zip(line, widths)):
+                tf = os.path.join(tmp, f"{tag}_hook{li}_{wi}.txt")
+                with open(tf, "w", encoding="utf-8") as f:
+                    f.write(w)
+                color = HOOK_COLOR if re.sub(r"[^A-Z0-9']", "", w) in hi else HOOK_TEXT_COLOR
+                parts = []
+                if fontfile:
+                    parts.append(f"fontfile={fontfile}")
+                parts += [f"textfile={tf}", "expansion=none", f"fontcolor={color}", f"fontsize={size}",
+                          f"borderw={bw}", "bordercolor=black", "shadowcolor=black@0.55", "shadowx=4", "shadowy=4",
+                          f"x={round(x)}", f"y={round(y)}"] + enable
+                out.append("drawtext=" + ":".join(parts))
+                x += ww + gap
+        return out
+    except Exception as e:
+        print(f"::warning::hook text skipped ({e})")
+        return []
+
+
 def build_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, segment_path):
     """One scene: composite image + eased zoom + subtitles + fades + audio."""
     composite = os.path.join(tmp, f"composite_{scene_index:03d}.png")
@@ -625,6 +700,7 @@ def build_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, 
     ]
     vf_parts += subtitle_filters(sub_text, duration, tmp, f"s{scene_index:03d}")
     vf_parts += watermark_filter()
+    vf_parts += hook_filters(tmp, f"s{scene_index:03d}")
     vf_parts.append(
         f"fade=t=in:st=0:d={FADE_SECONDS},fade=t=out:st={fade_out_start:.3f}:d={FADE_SECONDS}"
     )
@@ -688,6 +764,7 @@ def build_clip_segment(scene_index, clip_path, audio_path, duration, sub_text, t
 
     steps = subtitle_filters(sub_text, duration, tmp, f"c{scene_index:03d}")
     steps += watermark_filter()
+    steps += hook_filters(tmp, f"c{scene_index:03d}")
     if CLIP_SCENE_FADES:
         steps.append(f"fade=t=in:st=0:d={FADE_SECONDS}")
         steps.append(f"fade=t=out:st={fade_out_start:.3f}:d={FADE_SECONDS}")
@@ -1131,6 +1208,7 @@ def main():
                 )
 
                 segment_path = os.path.join(tmp, f"segment_{i:03d}.mp4")
+                HOOK_STATE["hook"] = ({"text": scene.get("hook_text"), "highlight": scene.get("hook_highlight"), "position": scene.get("hook_position"), "duration": scene.get("hook_duration")} if scene.get("hook_text") else None)
 
                 # 1) animated clip, if n8n gave us one for this scene
                 built = False
