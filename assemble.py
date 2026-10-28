@@ -455,14 +455,122 @@ def _cap_word_width(word, size):
     return w * size / 1000.0
 
 
-def shorts_caption_filters(text, duration, tmp, tag, start=0.0):
-    """CapCut-style captions: the phrase stays on screen in white and a yellow box moves to the word being spoken."""
-    words = []
+def _cap_tokens(text):
+    """The words of a caption text as (UPPERCASE word, ends-a-sentence-or-comma) - one list used by captions, hook and timing."""
+    out = []
     for w in re.sub(r"\s+", " ", (text or "").replace("\u2019", "'")).strip().split(" "):
         raw = w
         w = re.sub(r"[^A-Za-z0-9'!?&-]", "", w).upper()
-        if w:
-            words.append((w, bool(re.search(r"[.!?,;:]$", raw))))
+        if re.search(r"[A-Z0-9]", w):
+            out.append((w, bool(re.search(r"[.!?,;:]$", raw))))
+    return out
+
+
+def _word_weight(word):
+    """How long a word takes to say, roughly: its syllables (vowel groups) plus a little for its length."""
+    letters = re.sub(r"[^A-Z]", "", word)
+    if not letters:
+        return 2.0
+    syl = len(re.findall(r"[AEIOUY]+", letters))
+    if letters.endswith("E") and syl > 1 and not letters.endswith(("LE", "EE")):
+        syl -= 1
+    return max(1, syl) + 0.12 * len(letters)
+
+
+def align_words(tokens, audio_path):
+    """Real timing of every word, measured from the voice file itself: where the voice starts and stops, and where its
+    real pauses (commas, full stops) are. Words between two pauses share that stretch by their syllables.
+    Returns [(start, end), ...] one per token, or None if the voice cannot be measured (then the old estimate is used)."""
+    try:
+        n = len(tokens)
+        if n == 0 or not audio_path or not os.path.exists(audio_path):
+            return None
+        p = subprocess.run(["ffmpeg", "-v", "error", "-i", audio_path, "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
+                           capture_output=True, timeout=180)
+        raw = p.stdout
+        if p.returncode != 0 or len(raw) < 6400:
+            return None
+        import array
+        a = array.array("h")
+        a.frombytes(raw[:len(raw) // 2 * 2])
+        FR = 160                                   # 10 ms frames
+        env = []
+        for i in range(0, len(a) - FR + 1, FR):
+            seg = a[i:i + FR]
+            env.append((sum(x * x for x in seg) / float(FR)) ** 0.5)
+        if len(env) < 30:
+            return None
+        srt = sorted(env)
+        thr = max(srt[int(0.95 * (len(srt) - 1))] * 0.05, 30.0)
+        runs, start = [], None
+        for f, e in enumerate(env):
+            if e > thr and start is None:
+                start = f
+            elif e <= thr and start is not None:
+                runs.append([start, f])
+                start = None
+        if start is not None:
+            runs.append([start, len(env)])
+        runs = [r for r in runs if r[1] - r[0] >= 4]            # clicks are not speech
+        if not runs:
+            return None
+        regions = [runs[0]]
+        for r in runs[1:]:
+            if r[0] - regions[-1][1] < 14:                       # a gap shorter than 0.14 s is not a pause
+                regions[-1][1] = r[1]
+            else:
+                regions.append(r)
+        ss, se = regions[0][0] * 0.01, regions[-1][1] * 0.01
+        if se - ss < 0.3:
+            return None
+        pauses = [(regions[i][1] * 0.01, regions[i + 1][0] * 0.01) for i in range(len(regions) - 1)]
+        weights = [_word_weight(w) for w, _ in tokens]
+        total = float(sum(weights))
+        cum, c = [], 0.0
+        for wt in weights:
+            c += wt
+            cum.append(c)
+        anchors = {}                                             # boundary word index -> (pause start, pause end)
+        pi = 0
+        for b in [i for i in range(n - 1) if tokens[i][1]]:
+            texp = ss + (se - ss) * cum[b] / total
+            best, bd = None, None
+            for q in range(pi, len(pauses)):
+                d = abs((pauses[q][0] + pauses[q][1]) / 2.0 - texp)
+                if bd is None or d < bd:
+                    best, bd = q, d
+            if best is not None and bd <= 0.8:
+                anchors[b] = pauses[best]
+                pi = best + 1
+        starts = [0.0] * n
+        seg_first, t0 = 0, ss
+        cut = sorted(anchors) + [n - 1]
+        for b in cut:
+            last = (b == n - 1)
+            t1 = se if last else anchors[b][0]
+            ws = weights[seg_first:b + 1]
+            if t1 - t0 <= 0.02:
+                return None
+            acc = 0.0
+            for k, wt in enumerate(ws):
+                starts[seg_first + k] = t0 + (t1 - t0) * acc / sum(ws)
+                acc += wt
+            if not last:
+                t0 = anchors[b][1]
+            seg_first = b + 1
+        starts[0] = max(ss - 0.05, 0.0)
+        spans = [(starts[i], starts[i + 1]) for i in range(n - 1)] + [(starts[-1], se + 0.1)]
+        if any(e <= s0 for s0, e in spans):
+            return None
+        return spans
+    except Exception as e:
+        print(f"::warning::word timing could not be measured ({e}) - using the estimate")
+        return None
+
+
+def shorts_caption_filters(text, duration, tmp, tag, start=0.0, spans_in=None):
+    """CapCut-style captions: the phrase stays on screen in white and a yellow box moves to the word being spoken."""
+    words = _cap_tokens(text)
     if not words:
         return []
     size = SHORTS_FONT_SIZE
@@ -477,6 +585,8 @@ def shorts_caption_filters(text, duration, tmp, tag, start=0.0):
     for wt in weights:
         spans.append((t, t + speech * wt / total))
         t += speech * wt / total
+    if spans_in and len(spans_in) == len(words):       # the measured timing of the real voice, when we have it
+        spans = list(spans_in)
     # 1) group the words into screens of up to SHORTS_WORDS words (a screen also ends after . , ! ? ; :) with at most 2 lines
     def layout(group):
         lines, cur, cur_w = [], [], 0.0
@@ -537,19 +647,19 @@ def shorts_caption_filters(text, duration, tmp, tag, start=0.0):
 
 
 HOOK_SIZE_RATIO = 0.092      # hook font size as a share of the frame width (1080 wide -> about 99 px)
-HOOK_Y = 0.24                # vertical centre of the hook block (0.24 = upper part; the captions sit lower at SHORTS_Y)
+HOOK_Y = SHORTS_Y            # vertical centre of the hook block: the same middle spot as the captions
 HOOK_MAX_WIDTH = 0.88        # the hook may use this share of the frame width
 HOOK_MAX_LINES = 5
 HOOK_TEXT_COLOR = "white"
 
 
-def hook_filters(text, duration, tmp, tag, end=None):
+def hook_filters(text, duration, tmp, tag, end=None, spans_in=None):
     """OPTIONAL hook text: the full sentence, big, in several lines. While the voice reads it, a yellow box moves from word
     to word (same CapCut look as the captions). Returns [] when there is no hook, so films without a hook are built as before.
     end = the second the hook disappears (None = it stays for the whole scene, without the moving box)."""
     raw = re.sub(r"\s+", " ", str(text or "").replace("\u2019", "'")).strip().upper()
     raw = re.sub(r"[^A-Z0-9'!?&.,:\- ]", "", raw).strip()
-    words = [(w, bool(re.search(r"[.!?,;:]$", w))) for w in raw.split(" ") if re.sub(r"[^A-Z0-9]", "", w)]
+    words = _cap_tokens(raw)
     if not words:
         return []
     fontfile = os.path.join(tmp, "title_font.otf")
@@ -589,6 +699,8 @@ def hook_filters(text, duration, tmp, tag, end=None):
         for wt in weights:
             spans.append((t, t + speech_end * wt / total))
             t += speech_end * wt / total
+        if spans_in and len(spans_in) == len(words):          # the measured timing of the real voice, when we have it
+            spans = [(0.0 if k == 0 else a0, b0) for k, (a0, b0) in enumerate(spans_in)]
         spans[-1] = (spans[-1][0], shown_to)          # the last word's box stays until the hook goes
     padx, pady = size * 0.17, size * 0.13
     boxes, texts = [], []
@@ -614,12 +726,12 @@ def hook_filters(text, duration, tmp, tag, end=None):
     return boxes + texts          # boxes first, so the box sits behind the words
 
 
-def subtitle_filters(text, duration, tmp, tag, start=0.0):
+def subtitle_filters(text, duration, tmp, tag, start=0.0, spans=None):
     """Return a list of drawtext filters, each shown only during its time slot."""
     if not SUBTITLES:
         return []
     if SHORTS_CAPTIONS and HEIGHT > WIDTH:
-        return shorts_caption_filters(text, duration, tmp, tag, start)
+        return shorts_caption_filters(text, duration, tmp, tag, start, spans)
     chunks = split_subtitle_chunks(text)
     if not chunks:
         return []
@@ -688,30 +800,40 @@ def watermark_filter():
     return ["drawtext=" + ":".join(parts)]
 
 
-def hook_plan(hook, sub_text, duration):
+def hook_plan(hook, sub_text, duration, spans=None):
     """The voice reads the hook first. When the scene's narration starts with the hook words, the hook stays on screen
-    while it is spoken and the captions for the REST of the narration start right after it.
-    Returns (hook_text, caption_text, hook_end_seconds or None, caption_start_seconds)."""
+    while it is spoken and the captions for the REST of the narration start when the voice goes on.
+    spans = measured word timing of the whole scene narration (or None).
+    Returns (hook_text, caption_text, hook_end, caption_start, hook_spans, caption_spans)."""
     hook = str(hook or "").strip()
     sub_text = str(sub_text or "")
+    toks = _cap_tokens(sub_text)
+    if spans is not None and len(spans) != len(toks):
+        spans = None
     if not hook:
-        return "", sub_text, None, 0.0
+        return "", sub_text, None, 0.0, None, spans
     key = lambda w: re.sub(r"[^A-Z0-9]", "", w.upper())
-    hk = [key(w) for w in hook.split() if key(w)]
-    toks = [w for w in sub_text.split() if key(w)]
-    if not hk or len(toks) < len(hk) or [key(w) for w in toks[:len(hk)]] != hk:
-        return hook, sub_text, None, 0.0          # hook not at the start of the narration: show it for the whole scene, captions as before
-    if len(toks) == len(hk):
-        return hook, "", duration, 0.0            # the hook is the whole narration: moving box over the whole scene
-    wt = lambda w: len(key(w)) + 2 + (3 if re.search(r"[.!?,;:]$", w) else 0)
-    w_hook = sum(wt(w) for w in toks[:len(hk)])
-    w_all = sum(wt(w) for w in toks)
+    hk = [key(w) for w, _ in _cap_tokens(hook)]
+    if not hk or len(toks) < len(hk) or [key(w) for w, _ in toks[:len(hk)]] != hk:
+        return hook, sub_text, None, 0.0, None, spans          # hook not at the start of the narration: show it for the whole scene
+    k = len(hk)
+    if len(toks) == k:
+        return hook, "", duration, 0.0, (spans[:k] if spans else None), None      # the hook is the whole narration
+    orig = []
+    for w in sub_text.replace("\u2019", "'").split():
+        if re.search(r"[A-Z0-9]", re.sub(r"[^A-Za-z0-9'!?&-]", "", w).upper()):
+            orig.append(w)
+    rest = " ".join(orig[k:])
+    if spans:
+        hook_end = spans[k][0]                                  # the voice goes on with the next word
+        return hook, rest, hook_end, hook_end, spans[:k], spans[k:]
+    wt = lambda t: _word_weight(t[0]) + (1.5 if t[1] else 0)
     speech = max(duration - SCENE_TAIL_SECONDS, 0.5)
-    hook_end = min(speech * w_hook / float(w_all) + 0.15, duration - 0.5)
-    return hook, " ".join(toks[len(hk):]), hook_end, hook_end
+    hook_end = min(speech * sum(wt(t) for t in toks[:k]) / float(sum(wt(t) for t in toks)) + 0.15, duration - 0.5)
+    return hook, rest, hook_end, hook_end, None, None
 
 
-def build_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, segment_path, hook="", hook_end=None, cap_start=0.0):
+def build_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, segment_path, hook="", hook_end=None, cap_start=0.0, word_spans=None, hook_spans=None):
     """One scene: composite image + eased zoom + subtitles + fades + audio."""
     composite = os.path.join(tmp, f"composite_{scene_index:03d}.png")
     build_composite(image_path, composite)
@@ -724,8 +846,8 @@ def build_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, 
         f"scale={WIDTH * 2}:{HEIGHT * 2}:flags=lanczos",
         f"zoompan=z='{z}':x='{x}':y='{y}':d=1:s={WIDTH}x{HEIGHT}:fps={FPS}",
     ]
-    vf_parts += subtitle_filters(sub_text, duration, tmp, f"s{scene_index:03d}", cap_start)
-    vf_parts += hook_filters(hook, duration, tmp, f"s{scene_index:03d}", hook_end)
+    vf_parts += subtitle_filters(sub_text, duration, tmp, f"s{scene_index:03d}", cap_start, word_spans)
+    vf_parts += hook_filters(hook, duration, tmp, f"s{scene_index:03d}", hook_end, hook_spans)
     vf_parts += watermark_filter()
     vf_parts.append(
         f"fade=t=in:st=0:d={FADE_SECONDS},fade=t=out:st={fade_out_start:.3f}:d={FADE_SECONDS}"
@@ -750,7 +872,7 @@ def build_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, 
     ])
 
 
-def build_clip_segment(scene_index, clip_path, audio_path, duration, sub_text, tmp, segment_path, next_frame=None, hook="", hook_end=None, cap_start=0.0):
+def build_clip_segment(scene_index, clip_path, audio_path, duration, sub_text, tmp, segment_path, next_frame=None, hook="", hook_end=None, cap_start=0.0, word_spans=None, hook_spans=None):
     """One scene from an animated clip: the clip is fitted to the 9:16 frame on a blurred
     copy of itself (same look as the stills), then subtitles + fades + the scene's voice.
     A clip shorter than the narration is looped (or its last frame is held); a longer one is cut."""
@@ -788,8 +910,8 @@ def build_clip_segment(scene_index, clip_path, audio_path, duration, sub_text, t
     else:
         next_frame = None
 
-    steps = subtitle_filters(sub_text, duration, tmp, f"c{scene_index:03d}", cap_start)
-    steps += hook_filters(hook, duration, tmp, f"c{scene_index:03d}", hook_end)
+    steps = subtitle_filters(sub_text, duration, tmp, f"c{scene_index:03d}", cap_start, word_spans)
+    steps += hook_filters(hook, duration, tmp, f"c{scene_index:03d}", hook_end, hook_spans)
     steps += watermark_filter()
     if CLIP_SCENE_FADES:
         steps.append(f"fade=t=in:st=0:d={FADE_SECONDS}")
@@ -1234,7 +1356,12 @@ def main():
                 )
 
                 segment_path = os.path.join(tmp, f"segment_{i:03d}.mp4")
-                hook_text, sub_text, hook_end, cap_start = hook_plan(scene.get("hook") if i == 0 else "", sub_text, duration)   # optional: only scene 1, only if the script has a HOOK
+                scene_hook = str(scene.get("hook") or "").strip() if i == 0 else ""
+                spans_all = None
+                if audio_parts and sub_text.strip() and ((SUBTITLES and SHORTS_CAPTIONS and HEIGHT > WIDTH) or scene_hook):
+                    spans_all = align_words(_cap_tokens(sub_text), scene_audio_path)      # real word timing from the voice file
+                    print(f"scene {scene_num}: word timing " + ("measured from the voice" if spans_all else "estimated"))
+                hook_text, sub_text, hook_end, cap_start, hook_spans, word_spans = hook_plan(scene_hook, sub_text, duration, spans_all)   # optional hook: only scene 1, only if the script has a HOOK
 
                 # 1) animated clip, if n8n gave us one for this scene
                 built = False
@@ -1260,7 +1387,7 @@ def main():
                             except Exception as e:
                                 print(f"::warning::scene {scene_num}: soft join skipped ({e})")
                                 next_frame = None
-                        build_clip_segment(i, clip_path, scene_audio_path, duration, sub_text, tmp, segment_path, next_frame, hook=hook_text, hook_end=hook_end, cap_start=cap_start)
+                        build_clip_segment(i, clip_path, scene_audio_path, duration, sub_text, tmp, segment_path, next_frame, hook=hook_text, hook_end=hook_end, cap_start=cap_start, word_spans=word_spans, hook_spans=hook_spans)
                         built = True
                         print(f"scene {scene_num}: built from the animated clip")
                     except Exception as e:
@@ -1276,7 +1403,7 @@ def main():
                         print(f"::warning::scene {scene_num} has no completed image, using a plain fallback")
                         run(["ffmpeg", "-y", "-f", "lavfi",
                              "-i", f"color=c=gray20:s={WIDTH}x{HEIGHT}", "-frames:v", "1", image_path])
-                    build_segment(i, image_path, scene_audio_path, duration, sub_text, tmp, segment_path, hook=hook_text, hook_end=hook_end, cap_start=cap_start)
+                    build_segment(i, image_path, scene_audio_path, duration, sub_text, tmp, segment_path, hook=hook_text, hook_end=hook_end, cap_start=cap_start, word_spans=word_spans, hook_spans=hook_spans)
 
                 segment_paths.append(segment_path)
                 try:
