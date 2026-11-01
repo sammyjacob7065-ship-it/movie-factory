@@ -455,122 +455,14 @@ def _cap_word_width(word, size):
     return w * size / 1000.0
 
 
-def _cap_tokens(text):
-    """The words of a caption text as (UPPERCASE word, ends-a-sentence-or-comma) - one list used by captions, hook and timing."""
-    out = []
+def shorts_caption_filters(text, duration, tmp, tag):
+    """CapCut-style captions: the phrase stays on screen in white and a yellow box moves to the word being spoken."""
+    words = []
     for w in re.sub(r"\s+", " ", (text or "").replace("\u2019", "'")).strip().split(" "):
         raw = w
         w = re.sub(r"[^A-Za-z0-9'!?&-]", "", w).upper()
-        if re.search(r"[A-Z0-9]", w):
-            out.append((w, bool(re.search(r"[.!?,;:]$", raw))))
-    return out
-
-
-def _word_weight(word):
-    """How long a word takes to say, roughly: its syllables (vowel groups) plus a little for its length."""
-    letters = re.sub(r"[^A-Z]", "", word)
-    if not letters:
-        return 2.0
-    syl = len(re.findall(r"[AEIOUY]+", letters))
-    if letters.endswith("E") and syl > 1 and not letters.endswith(("LE", "EE")):
-        syl -= 1
-    return max(1, syl) + 0.12 * len(letters)
-
-
-def align_words(tokens, audio_path):
-    """Real timing of every word, measured from the voice file itself: where the voice starts and stops, and where its
-    real pauses (commas, full stops) are. Words between two pauses share that stretch by their syllables.
-    Returns [(start, end), ...] one per token, or None if the voice cannot be measured (then the old estimate is used)."""
-    try:
-        n = len(tokens)
-        if n == 0 or not audio_path or not os.path.exists(audio_path):
-            return None
-        p = subprocess.run(["ffmpeg", "-v", "error", "-i", audio_path, "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
-                           capture_output=True, timeout=180)
-        raw = p.stdout
-        if p.returncode != 0 or len(raw) < 6400:
-            return None
-        import array
-        a = array.array("h")
-        a.frombytes(raw[:len(raw) // 2 * 2])
-        FR = 160                                   # 10 ms frames
-        env = []
-        for i in range(0, len(a) - FR + 1, FR):
-            seg = a[i:i + FR]
-            env.append((sum(x * x for x in seg) / float(FR)) ** 0.5)
-        if len(env) < 30:
-            return None
-        srt = sorted(env)
-        thr = max(srt[int(0.95 * (len(srt) - 1))] * 0.05, 30.0)
-        runs, start = [], None
-        for f, e in enumerate(env):
-            if e > thr and start is None:
-                start = f
-            elif e <= thr and start is not None:
-                runs.append([start, f])
-                start = None
-        if start is not None:
-            runs.append([start, len(env)])
-        runs = [r for r in runs if r[1] - r[0] >= 4]            # clicks are not speech
-        if not runs:
-            return None
-        regions = [runs[0]]
-        for r in runs[1:]:
-            if r[0] - regions[-1][1] < 14:                       # a gap shorter than 0.14 s is not a pause
-                regions[-1][1] = r[1]
-            else:
-                regions.append(r)
-        ss, se = regions[0][0] * 0.01, regions[-1][1] * 0.01
-        if se - ss < 0.3:
-            return None
-        pauses = [(regions[i][1] * 0.01, regions[i + 1][0] * 0.01) for i in range(len(regions) - 1)]
-        weights = [_word_weight(w) for w, _ in tokens]
-        total = float(sum(weights))
-        cum, c = [], 0.0
-        for wt in weights:
-            c += wt
-            cum.append(c)
-        anchors = {}                                             # boundary word index -> (pause start, pause end)
-        pi = 0
-        for b in [i for i in range(n - 1) if tokens[i][1]]:
-            texp = ss + (se - ss) * cum[b] / total
-            best, bd = None, None
-            for q in range(pi, len(pauses)):
-                d = abs((pauses[q][0] + pauses[q][1]) / 2.0 - texp)
-                if bd is None or d < bd:
-                    best, bd = q, d
-            if best is not None and bd <= 0.8:
-                anchors[b] = pauses[best]
-                pi = best + 1
-        starts = [0.0] * n
-        seg_first, t0 = 0, ss
-        cut = sorted(anchors) + [n - 1]
-        for b in cut:
-            last = (b == n - 1)
-            t1 = se if last else anchors[b][0]
-            ws = weights[seg_first:b + 1]
-            if t1 - t0 <= 0.02:
-                return None
-            acc = 0.0
-            for k, wt in enumerate(ws):
-                starts[seg_first + k] = t0 + (t1 - t0) * acc / sum(ws)
-                acc += wt
-            if not last:
-                t0 = anchors[b][1]
-            seg_first = b + 1
-        starts[0] = max(ss - 0.05, 0.0)
-        spans = [(starts[i], starts[i + 1]) for i in range(n - 1)] + [(starts[-1], se + 0.1)]
-        if any(e <= s0 for s0, e in spans):
-            return None
-        return spans
-    except Exception as e:
-        print(f"::warning::word timing could not be measured ({e}) - using the estimate")
-        return None
-
-
-def shorts_caption_filters(text, duration, tmp, tag, start=0.0, spans_in=None):
-    """CapCut-style captions: the phrase stays on screen in white and a yellow box moves to the word being spoken."""
-    words = _cap_tokens(text)
+        if w:
+            words.append((w, bool(re.search(r"[.!?,;:]$", raw))))
     if not words:
         return []
     size = SHORTS_FONT_SIZE
@@ -578,15 +470,13 @@ def shorts_caption_filters(text, duration, tmp, tag, start=0.0, spans_in=None):
     gap = size * 0.28
     cap_h = size * 0.74                      # measured: capitals are 0.74 x the font size high
     pitch = size * 1.08
-    speech = max(duration - start - SCENE_TAIL_SECONDS, 0.5)
+    speech = max(duration - SCENE_TAIL_SECONDS, 0.5)
     weights = [len(w) + 2 + (3 if stop else 0) for w, stop in words]      # a word that ends a sentence or a comma gets a short pause
     total = float(sum(weights)) or 1.0
-    t, spans = float(start), []
+    t, spans = 0.0, []
     for wt in weights:
         spans.append((t, t + speech * wt / total))
         t += speech * wt / total
-    if spans_in and len(spans_in) == len(words):       # the measured timing of the real voice, when we have it
-        spans = list(spans_in)
     # 1) group the words into screens of up to SHORTS_WORDS words (a screen also ends after . , ! ? ; :) with at most 2 lines
     def layout(group):
         lines, cur, cur_w = [], [], 0.0
@@ -646,103 +536,23 @@ def shorts_caption_filters(text, duration, tmp, tag, start=0.0, spans_in=None):
     return out
 
 
-HOOK_SIZE_RATIO = 0.092      # hook font size as a share of the frame width (1080 wide -> about 99 px)
-HOOK_Y = SHORTS_Y            # vertical centre of the hook block: the same middle spot as the captions
-HOOK_MAX_WIDTH = 0.88        # the hook may use this share of the frame width
-HOOK_MAX_LINES = 5
-HOOK_TEXT_COLOR = "white"
-
-
-def hook_filters(text, duration, tmp, tag, end=None, spans_in=None):
-    """OPTIONAL hook text: the full sentence, big, in several lines. While the voice reads it, a yellow box moves from word
-    to word (same CapCut look as the captions). Returns [] when there is no hook, so films without a hook are built as before.
-    end = the second the hook disappears (None = it stays for the whole scene, without the moving box)."""
-    raw = re.sub(r"\s+", " ", str(text or "").replace("\u2019", "'")).strip().upper()
-    raw = re.sub(r"[^A-Z0-9'!?&.,:\- ]", "", raw).strip()
-    words = _cap_tokens(raw)
-    if not words:
-        return []
-    fontfile = os.path.join(tmp, "title_font.otf")
-    if not os.path.exists(fontfile):
-        fontfile = _title_font_file(tmp)[0]
-    embedded = os.path.basename(str(fontfile)) == "title_font.otf"
-    max_px = WIDTH * HOOK_MAX_WIDTH
-    size = int(WIDTH * HOOK_SIZE_RATIO)
-    while True:
-        gap = size * 0.28
-        ww = [_text_width(w, size, embedded) for w, _ in words]
-        lines, cur, cur_w = [], [], 0.0
-        for k in range(len(words)):
-            add = ww[k] if not cur else gap + ww[k]
-            if cur and cur_w + add > max_px:
-                lines.append(cur)
-                cur, cur_w = [k], ww[k]
-            else:
-                cur.append(k)
-                cur_w += add
-        if cur:
-            lines.append(cur)
-        if (len(lines) <= HOOK_MAX_LINES and max(ww) <= max_px) or size <= 36:
-            break
-        size -= 4
-    cap_h = size * 0.74
-    pitch = size * 1.12
-    block_h = (len(lines) - 1) * pitch + cap_h
-    top = HEIGHT * HOOK_Y - block_h / 2.0
-    shown_to = end if end else duration
-    spans = None
-    if end:      # one time slot per word, spread over the spoken part (long words and sentence ends take a little longer)
-        speech_end = end - 0.15 if end < duration - 0.01 else max(duration - SCENE_TAIL_SECONDS, 0.5)
-        weights = [len(re.sub(r"[^A-Z0-9]", "", w)) + 2 + (3 if stop else 0) for w, stop in words]
-        total = float(sum(weights)) or 1.0
-        t, spans = 0.0, []
-        for wt in weights:
-            spans.append((t, t + speech_end * wt / total))
-            t += speech_end * wt / total
-        if spans_in and len(spans_in) == len(words):          # the measured timing of the real voice, when we have it
-            spans = [(0.0 if k == 0 else a0, b0) for k, (a0, b0) in enumerate(spans_in)]
-        spans[-1] = (spans[-1][0], shown_to)          # the last word's box stays until the hook goes
-    padx, pady = size * 0.17, size * 0.13
-    boxes, texts = [], []
-    for li, line in enumerate(lines):
-        line_w = sum(ww[k] for k in line) + gap * (len(line) - 1)
-        x = (WIDTH - line_w) / 2.0
-        cap_top_y = top + li * pitch
-        for k in line:
-            if spans:
-                boxes.append("drawbox=x=%d:y=%d:w=%d:h=%d:color=%s:t=fill:enable='between(t,%.3f,%.3f)'" % (
-                    round(x - padx), round(cap_top_y - pady), round(ww[k] + 2 * padx), round(cap_h + 2 * pady), SHORTS_BOX_COLOR, spans[k][0], spans[k][1]))
-            tf = os.path.join(tmp, f"{tag}_hook{k}.txt")
-            with open(tf, "w", encoding="utf-8") as f:
-                f.write(words[k][0])
-            parts = []
-            if fontfile:
-                parts.append(f"fontfile={fontfile}")
-            parts += [f"textfile={tf}", "expansion=none", f"fontcolor={HOOK_TEXT_COLOR}", f"fontsize={size}",
-                      "borderw=9", "bordercolor=black", f"x={round(x)}", f"y={round(cap_top_y)}",
-                      f"enable='between(t,0,{shown_to:.3f})'"]
-            texts.append("drawtext=" + ":".join(parts))
-            x += ww[k] + gap
-    return boxes + texts          # boxes first, so the box sits behind the words
-
-
-def subtitle_filters(text, duration, tmp, tag, start=0.0, spans=None):
+def subtitle_filters(text, duration, tmp, tag):
     """Return a list of drawtext filters, each shown only during its time slot."""
     if not SUBTITLES:
         return []
     if SHORTS_CAPTIONS and HEIGHT > WIDTH:
-        return shorts_caption_filters(text, duration, tmp, tag, start, spans)
+        return shorts_caption_filters(text, duration, tmp, tag)
     chunks = split_subtitle_chunks(text)
     if not chunks:
         return []
-    speech = max(duration - start - SCENE_TAIL_SECONDS, 0.5)
+    speech = max(duration - SCENE_TAIL_SECONDS, 0.5)
     total_chars = sum(len(c) for c in chunks) or 1
     font = find_font()
     filters = []
-    t = float(start)
+    t = 0.0
     for k, chunk in enumerate(chunks):
         span = speech * (len(chunk) / total_chars)
-        c_start, end = t, t + span
+        start, end = t, t + span
         t = end
         wrapped = "\n".join(textwrap.wrap(chunk, width=SUB_WRAP_CHARS))
         tf = os.path.join(tmp, f"{tag}_sub{k}.txt")
@@ -764,7 +574,7 @@ def subtitle_filters(text, duration, tmp, tag, start=0.0, spans=None):
             "line_spacing=10",
             "x=(w-text_w)/2",
             f"y=h-th-{SUB_BOTTOM_MARGIN}",
-            f"enable='between(t,{c_start:.3f},{end:.3f})'",
+            f"enable='between(t,{start:.3f},{end:.3f})'",
         ]
         filters.append("drawtext=" + ":".join(parts))
     return filters
@@ -800,40 +610,7 @@ def watermark_filter():
     return ["drawtext=" + ":".join(parts)]
 
 
-def hook_plan(hook, sub_text, duration, spans=None):
-    """The voice reads the hook first. When the scene's narration starts with the hook words, the hook stays on screen
-    while it is spoken and the captions for the REST of the narration start when the voice goes on.
-    spans = measured word timing of the whole scene narration (or None).
-    Returns (hook_text, caption_text, hook_end, caption_start, hook_spans, caption_spans)."""
-    hook = str(hook or "").strip()
-    sub_text = str(sub_text or "")
-    toks = _cap_tokens(sub_text)
-    if spans is not None and len(spans) != len(toks):
-        spans = None
-    if not hook:
-        return "", sub_text, None, 0.0, None, spans
-    key = lambda w: re.sub(r"[^A-Z0-9]", "", w.upper())
-    hk = [key(w) for w, _ in _cap_tokens(hook)]
-    if not hk or len(toks) < len(hk) or [key(w) for w, _ in toks[:len(hk)]] != hk:
-        return hook, sub_text, None, 0.0, None, spans          # hook not at the start of the narration: show it for the whole scene
-    k = len(hk)
-    if len(toks) == k:
-        return hook, "", duration, 0.0, (spans[:k] if spans else None), None      # the hook is the whole narration
-    orig = []
-    for w in sub_text.replace("\u2019", "'").split():
-        if re.search(r"[A-Z0-9]", re.sub(r"[^A-Za-z0-9'!?&-]", "", w).upper()):
-            orig.append(w)
-    rest = " ".join(orig[k:])
-    if spans:
-        hook_end = spans[k][0]                                  # the voice goes on with the next word
-        return hook, rest, hook_end, hook_end, spans[:k], spans[k:]
-    wt = lambda t: _word_weight(t[0]) + (1.5 if t[1] else 0)
-    speech = max(duration - SCENE_TAIL_SECONDS, 0.5)
-    hook_end = min(speech * sum(wt(t) for t in toks[:k]) / float(sum(wt(t) for t in toks)) + 0.15, duration - 0.5)
-    return hook, rest, hook_end, hook_end, None, None
-
-
-def build_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, segment_path, hook="", hook_end=None, cap_start=0.0, word_spans=None, hook_spans=None):
+def build_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, segment_path):
     """One scene: composite image + eased zoom + subtitles + fades + audio."""
     composite = os.path.join(tmp, f"composite_{scene_index:03d}.png")
     build_composite(image_path, composite)
@@ -846,8 +623,7 @@ def build_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, 
         f"scale={WIDTH * 2}:{HEIGHT * 2}:flags=lanczos",
         f"zoompan=z='{z}':x='{x}':y='{y}':d=1:s={WIDTH}x{HEIGHT}:fps={FPS}",
     ]
-    vf_parts += subtitle_filters(sub_text, duration, tmp, f"s{scene_index:03d}", cap_start, word_spans)
-    vf_parts += hook_filters(hook, duration, tmp, f"s{scene_index:03d}", hook_end, hook_spans)
+    vf_parts += subtitle_filters(sub_text, duration, tmp, f"s{scene_index:03d}")
     vf_parts += watermark_filter()
     vf_parts.append(
         f"fade=t=in:st=0:d={FADE_SECONDS},fade=t=out:st={fade_out_start:.3f}:d={FADE_SECONDS}"
@@ -872,7 +648,7 @@ def build_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, 
     ])
 
 
-def build_clip_segment(scene_index, clip_path, audio_path, duration, sub_text, tmp, segment_path, next_frame=None, hook="", hook_end=None, cap_start=0.0, word_spans=None, hook_spans=None):
+def build_clip_segment(scene_index, clip_path, audio_path, duration, sub_text, tmp, segment_path, next_frame=None):
     """One scene from an animated clip: the clip is fitted to the 9:16 frame on a blurred
     copy of itself (same look as the stills), then subtitles + fades + the scene's voice.
     A clip shorter than the narration is looped (or its last frame is held); a longer one is cut."""
@@ -910,8 +686,7 @@ def build_clip_segment(scene_index, clip_path, audio_path, duration, sub_text, t
     else:
         next_frame = None
 
-    steps = subtitle_filters(sub_text, duration, tmp, f"c{scene_index:03d}", cap_start, word_spans)
-    steps += hook_filters(hook, duration, tmp, f"c{scene_index:03d}", hook_end, hook_spans)
+    steps = subtitle_filters(sub_text, duration, tmp, f"c{scene_index:03d}")
     steps += watermark_filter()
     if CLIP_SCENE_FADES:
         steps.append(f"fade=t=in:st=0:d={FADE_SECONDS}")
@@ -1254,6 +1029,176 @@ def make_thumbnail(image_path, title, out_path, tmp):
     return out_path
 
 
+# ---- HOOK THUMBNAIL (added): the thumbnail has the shape of the film (vertical film = vertical cover) and shows the script's HOOK ----
+THUMB_HOOK_ENABLED = True       # False = the old cover (film title, always 1280x720)
+THUMB_HOOK_HI_WORDS = 2         # how many key words of the hook get the gold colour (the longest ones)
+THUMB_HOOK_BAR = True           # a short gold bar under / above the hook
+THUMB_HOOK_TOP = 0.115          # vertical covers: where the hook starts, as a share of the cover height (0.115 = near the top)
+
+
+def thumb_canvas():
+    """Cover size that follows the film: vertical 1080x1920, square 1080x1080, 4:3 1280x960, otherwise 1280x720."""
+    if HEIGHT > WIDTH:
+        return 1080, 1920, "vertical"
+    if WIDTH == HEIGHT:
+        return 1080, 1080, "square"
+    if WIDTH * 3 == HEIGHT * 4:
+        return 1280, 960, "four-three"
+    return 1280, 720, "horizontal"
+
+
+def make_hook_thumbnail(image_path, text, title, out_path, tmp):
+    """Cover in the shape of the film with the HOOK as the main design: big poster capitals, the key words in gold,
+    white for the rest, thick black outline + shadow, a dark fade for reading, a small gold bar and the film title as a small label.
+    Vertical covers carry the hook in the upper part (the lower part is covered by buttons in the Shorts feed);
+    horizontal covers carry it along the bottom like a movie poster."""
+    W, H, shape = thumb_canvas()
+    vertical = shape in ("vertical", "square")
+    font, embedded = _title_font_file(tmp)
+    if not embedded:
+        raise RuntimeError("poster font not available")
+    sq = THUMB_SQUEEZE
+
+    clean = re.sub(r"\s+", " ", str(text or "").replace("\u2019", "'")).strip().upper()
+    words = [w for w in (re.sub(r"[^A-Z0-9'!?&.,:\-]", "", t) for t in clean.split(" ")) if w]
+    if not words:
+        raise RuntimeError("no hook text")
+    # key words: the longest ones (5+ letters) get the gold colour
+    cand = sorted({re.sub(r"[^A-Z0-9']", "", w) for w in words if len(re.sub(r"[^A-Z0-9']", "", w)) >= 5}, key=lambda s: -len(s))[:THUMB_HOOK_HI_WORDS]
+    is_hi = [re.sub(r"[^A-Z0-9']", "", w) in cand for w in words]
+
+    margin = int(W * 0.06)
+    max_w = W - 2 * margin
+    max_lines = 5 if vertical else 3
+    max_block = 0.46 * H if vertical else 0.60 * H
+    size = {"vertical": 230, "square": 190, "four-three": 170, "horizontal": 170}[shape]
+
+    def layout(sz):
+        gap = _text_width(" ", sz, True) * sq * 1.25
+        lines, cur, cur_w = [], [], 0.0
+        for i, w in enumerate(words):
+            ww = _text_width(w, sz, True) * sq
+            add = ww if not cur else gap + ww
+            if cur and cur_w + add > max_w:
+                lines.append(cur); cur, cur_w = [i], ww
+            else:
+                cur.append(i); cur_w += add
+        if cur:
+            lines.append(cur)
+        return lines, gap
+
+    while True:
+        lines, gap = layout(size)
+        line_h_ = int(size * 1.02)
+        step_ = int(line_h_ * 0.90)
+        block_ = line_h_ + step_ * (len(lines) - 1)
+        widest_ok = all(_text_width(w, size, True) * sq <= max_w for w in words)
+        if (len(lines) <= max_lines and block_ <= max_block and widest_ok) or size <= 70:
+            break
+        size -= 6
+
+    pad = max(10, size // 7)
+    line_h = int(size * 1.02)
+    ch = line_h + 2 * pad
+    ch -= ch % 2
+    step = int(line_h * 0.90)
+    block_h = line_h + step * (len(lines) - 1)
+    bw = max(7, size // 11)
+    shx, shy = max(6, size // 20), max(8, size // 16)
+    bar_h = max(8, int(H * 0.0075))
+    bar_w = int(W * 0.30)
+
+    if vertical:
+        y_first = int(H * THUMB_HOOK_TOP)
+        bar_y = y_first + block_h + int(size * 0.20)
+    else:
+        bar_y = H - 34 - bar_h
+        y_first = bar_y - int(size * 0.16) - block_h
+
+    gold_top = _hex_rgb(THUMB_COLOR_TOP, "FFE45A")
+    gold_bot = _hex_rgb(THUMB_COLOR_BOTTOM, "F07A0A")
+    white_top, white_bot = (255, 255, 255), (206, 206, 206)
+
+    # background: the scene picture filling the cover, a little richer, with a dark fade behind the text
+    if vertical:
+        fade_a = f"clip(240*pow(clip((0.66-Y/{H})/0.66,0,1),1.35),0,255)"          # dark at the top, clear by two thirds
+    else:
+        fade_a = f"clip(235*pow(clip((Y/{H}-0.38)/0.62,0,1),1.5),0,255)"            # dark at the bottom
+    graph = [
+        f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H}:(iw-{W})/2:(ih-{H})*0.18,"
+        "eq=contrast=1.12:saturation=1.25:brightness=0.01,unsharp=5:5:0.6:5:5:0.0,vignette=angle=PI/6[bg]",
+        f"color=c=black:s={W}x{H},format=yuva420p,geq=lum='0':cb='128':cr='128':a='{fade_a}'[fade]",
+        "[bg][fade]overlay=format=auto[b0]",
+    ]
+    cur = "b0"
+    fontopt = f"fontfile={font}:"
+
+    # small label with the film title (only when the cover shows a real hook and the label is switched on)
+    tag_text = re.sub(r"[^A-Z0-9'!?&.,:\- ]", "", str(title or "").upper()).strip()[:26]
+    if THUMB_TAG and tag_text and tag_text != clean:
+        tagf = os.path.join(tmp, "thumb_tag.txt")
+        with open(tagf, "w") as f:
+            f.write(tag_text)
+        tsize = int(H * 0.024) if vertical else 34
+        tag_w = int(_text_width(tag_text, tsize, True) + tsize * 1.4)
+        tag_h = int(tsize * 1.85)
+        tx, ty = (margin, int(H * 0.035)) if vertical else (36, 32)
+        graph.append(f"[{cur}]drawbox=x={tx}:y={ty}:w={tag_w}:h={tag_h}:color=black@0.78:t=fill[g1]")
+        graph.append(f"[g1]drawbox=x={tx}:y={ty}:w={tag_w}:h={tag_h}:color=0x{THUMB_ACCENT}@0.95:t=3[g2]")
+        graph.append(f"[g2]drawtext={fontopt}textfile={tagf}:fontsize={tsize}:fontcolor=0x{THUMB_ACCENT}:"
+                     f"x={tx}+(({tag_w}-text_w)/2):y={ty}+(({tag_h}-text_h)/2)[g3]")
+        cur = "g3"
+
+    # the hook, word by word (each word is its own little poster canvas, so key words can have another colour)
+    for li, line in enumerate(lines):
+        widths = [_text_width(words[i], size, True) * sq for i in line]
+        line_w = sum(widths) + gap * (len(line) - 1)
+        x = (W - line_w) / 2.0
+        y_pos = y_first + li * step
+        for i, ww in zip(line, widths):
+            k = f"{li}_{i}"
+            wf = os.path.join(tmp, f"thumb_w{k}.txt")
+            with open(wf, "w") as f:
+                f.write(words[i])
+            tw = int(_text_width(words[i], size, True)) + 2 * pad + 8
+            tw -= tw % 2
+            sw = max(2, int(tw * sq))
+            sw -= sw % 2
+            lead = (pad + 4) * sq                          # empty margin of the canvas to the left of the first letter
+            ox = int(round(x - lead))
+            top, bot = (gold_top, gold_bot) if is_hi[i] else (white_top, white_bot)
+            common = f"fontsize={size}:fontcolor=white:y=(h-text_h)/2:x=(w-text_w)/2"
+            graph += [
+                f"color=c=black:s={tw}x{ch},drawtext={fontopt}textfile={wf}:{common},format=gray,scale={sw}:{ch},lutyuv=y='clip((val-16)*1.1644,0,255)'[mf{k}]",
+                f"color=c=black:s={tw}x{ch},drawtext={fontopt}textfile={wf}:{common}:borderw={bw}:bordercolor=white,"
+                f"format=gray,scale={sw}:{ch},lutyuv=y='clip((val-16)*1.1644,0,255)'[mo{k}]",
+                f"color=c=black:s={sw}x{ch},format=gbrp,geq="
+                f"r='{top[0]}+({bot[0]}-{top[0]})*clip((Y-{pad})/{line_h},0,1)':"
+                f"g='{top[1]}+({bot[1]}-{top[1]})*clip((Y-{pad})/{line_h},0,1)':"
+                f"b='{top[2]}+({bot[2]}-{top[2]})*clip((Y-{pad})/{line_h},0,1)',format=rgba[gr{k}]",
+                f"[gr{k}][mf{k}]alphamerge[fill{k}]",
+                f"color=c=black:s={sw}x{ch},format=rgba[bk{k}]",
+                f"[bk{k}][mo{k}]alphamerge,split=2[ol{k}][sh0{k}]",
+                f"[sh0{k}]boxblur=7:2,colorchannelmixer=aa=0.75[sh{k}]",
+                f"[{cur}][sh{k}]overlay=x={ox}+{shx}:y={y_pos}+{shy}:format=auto[s{k}]",
+                f"[s{k}][ol{k}]overlay=x={ox}:y={y_pos}:format=auto[o{k}]",
+                f"[o{k}][fill{k}]overlay=x={ox}:y={y_pos}:format=auto[d{k}]",
+            ]
+            cur = f"d{k}"
+            x += ww + gap
+
+    if THUMB_HOOK_BAR:
+        graph.append(f"[{cur}]drawbox=x=({W}-{bar_w})/2:y={bar_y}:w={bar_w}:h={bar_h}:color=0x{THUMB_ACCENT}@0.95:t=fill[gbar]")
+        cur = "gbar"
+
+    for q in (2, 5, 9):             # YouTube allows up to 2 MB: lower the quality until it fits
+        run(["ffmpeg", "-y", "-i", image_path, "-filter_complex", ";".join(graph), "-map", f"[{cur}]",
+             "-frames:v", "1", "-update", "1", "-q:v", str(q), out_path])
+        if os.path.getsize(out_path) < 1_900_000:
+            break
+    return out_path
+
+
 def main():
     manifest = json.loads(os.environ["MANIFEST_JSON"])
     global WIDTH, HEIGHT, SUBTITLES, SUB_WRAP_CHARS, SUB_CHUNK_CHARS, SUB_BOTTOM_MARGIN, SUB_FONT_SIZE
@@ -1356,12 +1301,6 @@ def main():
                 )
 
                 segment_path = os.path.join(tmp, f"segment_{i:03d}.mp4")
-                scene_hook = str(scene.get("hook") or "").strip() if i == 0 else ""
-                spans_all = None
-                if audio_parts and sub_text.strip() and ((SUBTITLES and SHORTS_CAPTIONS and HEIGHT > WIDTH) or scene_hook):
-                    spans_all = align_words(_cap_tokens(sub_text), scene_audio_path)      # real word timing from the voice file
-                    print(f"scene {scene_num}: word timing " + ("measured from the voice" if spans_all else "estimated"))
-                hook_text, sub_text, hook_end, cap_start, hook_spans, word_spans = hook_plan(scene_hook, sub_text, duration, spans_all)   # optional hook: only scene 1, only if the script has a HOOK
 
                 # 1) animated clip, if n8n gave us one for this scene
                 built = False
@@ -1387,7 +1326,7 @@ def main():
                             except Exception as e:
                                 print(f"::warning::scene {scene_num}: soft join skipped ({e})")
                                 next_frame = None
-                        build_clip_segment(i, clip_path, scene_audio_path, duration, sub_text, tmp, segment_path, next_frame, hook=hook_text, hook_end=hook_end, cap_start=cap_start, word_spans=word_spans, hook_spans=hook_spans)
+                        build_clip_segment(i, clip_path, scene_audio_path, duration, sub_text, tmp, segment_path, next_frame)
                         built = True
                         print(f"scene {scene_num}: built from the animated clip")
                     except Exception as e:
@@ -1403,7 +1342,7 @@ def main():
                         print(f"::warning::scene {scene_num} has no completed image, using a plain fallback")
                         run(["ffmpeg", "-y", "-f", "lavfi",
                              "-i", f"color=c=gray20:s={WIDTH}x{HEIGHT}", "-frames:v", "1", image_path])
-                    build_segment(i, image_path, scene_audio_path, duration, sub_text, tmp, segment_path, hook=hook_text, hook_end=hook_end, cap_start=cap_start, word_spans=word_spans, hook_spans=hook_spans)
+                    build_segment(i, image_path, scene_audio_path, duration, sub_text, tmp, segment_path)
 
                 segment_paths.append(segment_path)
                 try:
@@ -1469,7 +1408,16 @@ def main():
                         timg = os.path.join(tmp, "thumb_src.png")
                         download(image_by_scene[tscene], timg)
                         tout = os.path.join(tmp, "thumbnail.jpg")
-                        make_thumbnail(timg, manifest.get("title") or ep.get("title") or "", tout, tmp)
+                        _title = manifest.get("title") or ep.get("title") or ""
+                        _s1 = scenes[0] if scenes else {}
+                        _hook = str(_s1.get("hook") or _s1.get("hook_text") or "").strip()    # the script's HOOK line (saved on scene 1)
+                        try:
+                            if not THUMB_HOOK_ENABLED:
+                                raise RuntimeError("hook cover switched off")
+                            make_hook_thumbnail(timg, _hook or _title, _title, tout, tmp)
+                        except Exception as e:
+                            print(f"::warning::hook cover not used ({e}) - making the classic cover instead")
+                            make_thumbnail(timg, _title, tout, tmp)
                         with open(tout, "rb") as tf:
                             tr = requests.post(
                                 f"{SUPABASE_URL}/storage/v1/object/{BUCKET}/thumbnails/{episode_id}.jpg",
