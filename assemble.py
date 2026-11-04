@@ -26,6 +26,7 @@ import random
 import re
 import subprocess
 import tempfile
+import time
 import textwrap
 import requests
 
@@ -52,7 +53,8 @@ SUB_WRAP_CHARS = 46         # characters per subtitle line (horizontal film)
 SUB_CHUNK_CHARS = 92        # characters per subtitle screen (about 2 lines)
 SUB_BOTTOM_MARGIN = 90      # pixels from the bottom
 # SHORTS CAPTIONS (vertical 9:16 films only), CapCut style: 3-4 words stay on screen in white, and a yellow box jumps from word to word
-# exactly while that word is being spoken. The timing of each word is shared out over the spoken part of the scene by its number of letters.
+# exactly while that word is being spoken. v67: the timing comes from the REAL voice (Whisper word times when GROQ_API_KEY is set; otherwise the real
+# start/end of every voice line and every pause measured in the audio), not from a guess over the whole scene.
 SHORTS_CAPTIONS = True      # False = the older small subtitles also in vertical films
 SHORTS_WORDS = 4            # most words on screen at once
 SHORTS_FONT_SIZE = 96
@@ -455,6 +457,200 @@ def _cap_word_width(word, size):
     return w * size / 1000.0
 
 
+
+# ---------------- REAL WORD TIMING FOR THE YELLOW BOX (v67) ----------------
+CAPTION_TIMING = {}          # caption tag -> [(WORD, s, e)] with the REAL time of every word inside the scene
+CAPTION_WHISPER = True       # True = ask Whisper (Groq) for the exact time of every spoken word, when GROQ_API_KEY is set; False = only measure the audio
+CAPTION_LEAD = 0.04          # seconds the box appears BEFORE the word starts (the eye needs the box a hair early)
+STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+
+
+def speech_bursts(path, noise_db=-38, min_gap=0.12):
+    """Measure the real speech in an audio file: [(start, end)] of the stretches that are not silent."""
+    total = probe_duration(path)
+    p = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", path, "-af", f"silencedetect=noise={noise_db}dB:d={min_gap}", "-f", "null", "-"],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    sil, start = [], None
+    for line in (p.stdout or "").splitlines():
+        m = re.search(r"silence_start:\s*(-?[0-9.]+)", line)
+        if m:
+            start = max(float(m.group(1)), 0.0)
+        m = re.search(r"silence_end:\s*([0-9.]+)", line)
+        if m and start is not None:
+            sil.append((start, float(m.group(1)))); start = None
+    if start is not None:
+        sil.append((start, total))
+    bursts, cur = [], 0.0
+    for a, b in sil:
+        if a - cur > 0.04:
+            bursts.append((cur, a))
+        cur = b
+    if total - cur > 0.04:
+        bursts.append((cur, total))
+    return bursts or [(0.0, total)]
+
+
+def whisper_word_times(path):
+    """Exact word times from Whisper (Groq). Returns [{w, s, e}] or [] when there is no key / no network."""
+    keys = [k.strip() for k in (os.environ.get("GROQ_API_KEY", "") + "," + os.environ.get("GROQ_API_KEY_2", "")).split(",") if k.strip()]
+    if not CAPTION_WHISPER or not keys:
+        return []
+    for attempt in range(3):
+        try:
+            with open(path, "rb") as f:
+                r = requests.post(STT_URL, headers={"Authorization": "Bearer " + keys[attempt % len(keys)]}, files={"file": f},
+                                  data={"model": "whisper-large-v3-turbo", "response_format": "verbose_json",
+                                        "timestamp_granularities[]": "word", "temperature": "0"}, timeout=120)
+            if r.status_code == 200:
+                return [{"w": str(w.get("word", "")).strip(), "s": float(w.get("start", 0)), "e": float(w.get("end", 0))}
+                        for w in r.json().get("words", []) if str(w.get("word", "")).strip()]
+            print(f"::warning::whisper {r.status_code}: {r.text[:120]}")
+        except Exception as e:
+            print(f"::warning::whisper failed ({e})")
+        time.sleep(3 * (attempt + 1))
+    return []
+
+
+def _norm(w):
+    return re.sub(r"[^a-z0-9]", "", (w or "").lower())
+
+
+def _syllables(w):
+    w = _norm(w)
+    if not w:
+        return 1
+    if w.isdigit():
+        return len(w)
+    n = len(re.findall(r"[aeiouy]+", w))
+    if w.endswith("e") and not w.endswith(("le", "ee")) and n > 1:
+        n -= 1
+    return max(1, n)
+
+
+def _weight(w):
+    """How long a word takes to say: mostly syllables, a little by letters (better than letters alone)."""
+    return 0.5 + 0.42 * _syllables(w) + 0.03 * len(_norm(w))
+
+
+def align_to_whisper(words, heard, t0, t1):
+    """Match the script words to what Whisper heard; matched words take Whisper's times, the rest are filled in between them."""
+    import difflib
+    a = [_norm(w) for w in words]
+    b = [_norm(h["w"]) for h in heard]
+    sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    pos = [None] * len(a)
+    for blk in sm.get_matching_blocks():
+        for k in range(blk.size):
+            h = heard[blk.b + k]
+            pos[blk.a + k] = (h["s"], max(h["e"], h["s"] + 0.04))
+    for op, i1, i2, j1, j2 in sm.get_opcodes():
+        if op == "replace" and (i2 - i1) == (j2 - j1):          # same count, different spelling (numbers, 'gonna'): trust the position
+            for k in range(i2 - i1):
+                h = heard[j1 + k]
+                pos[i1 + k] = (h["s"], max(h["e"], h["s"] + 0.04))
+    if sum(1 for p in pos if p) < max(2, int(0.6 * len(a))):
+        return None                                              # Whisper heard something else: do not trust it
+    i = 0
+    while i < len(pos):
+        if pos[i] is None:
+            j = i
+            while j < len(pos) and pos[j] is None:
+                j += 1
+            left = pos[i - 1][1] if i > 0 else t0
+            right = pos[j][0] if j < len(pos) else t1
+            right = max(right, left + 0.08 * (j - i))
+            wts = [_weight(words[k]) for k in range(i, j)]
+            tot, c = sum(wts) or 1.0, left
+            for k, wt in zip(range(i, j), wts):
+                pos[k] = (c, c + (right - left) * wt / tot)
+                c += (right - left) * wt / tot
+            i = j
+        else:
+            i += 1
+    return pos
+
+
+def spread_on_bursts(words, bursts):
+    """No Whisper: share the words over the REAL speech bursts of the audio (measured pauses are kept), by syllable weight."""
+    wts = [_weight(w) for w in words]
+    lens = [max(b - a, 0.01) for a, b in bursts]
+    speech, tot = sum(lens), (sum(wts) or 1.0)
+
+    def real(x):
+        x, acc = max(0.0, min(x, speech)), 0.0
+        for (a, b), L in zip(bursts, lens):
+            if x <= acc + L + 1e-9:
+                return a + (x - acc)
+            acc += L
+        return bursts[-1][1]
+    def burst_of(t):
+        for k, (a, b) in enumerate(bursts):
+            if t <= b + 1e-6:
+                return k
+        return len(bursts) - 1
+    out, cum = [], 0.0
+    for wt in wts:
+        s, e = real(cum / tot * speech), real((cum + wt) / tot * speech)
+        ks, ke = burst_of(s), burst_of(e - 1e-6)
+        if ks != ke:                                            # a word never sits across a real pause: it belongs to the burst where most of it is
+            if bursts[ks][1] - s >= 0.06:
+                e = bursts[ks][1]
+            else:
+                s = bursts[ke][0]
+        out.append((s, max(e, s + 0.05)))
+        cum += wt
+    return out
+
+
+def prepare_caption_timing(tag, blocks):
+    """blocks = [(audio_file, prefix_words, text)] in scene order. Stores CAPTION_TIMING[tag] = [(WORD, s, e)] with real times in the scene audio."""
+    try:
+        res, cursor = [], 0.0
+        for path, prefix, text in blocks:
+            dur = probe_duration(path)
+            bursts = speech_bursts(path)
+            toks = []
+            for w in re.sub(r"\s+", " ", (text or "").replace("’", "'")).strip().split(" "):
+                cl = re.sub(r"[^A-Za-z0-9'!?&-]", "", w).upper()
+                if cl:
+                    toks.append(cl)
+            if toks:
+                times = None
+                heard = whisper_word_times(path)
+                if heard:
+                    times = align_to_whisper(toks, heard, bursts[0][0], bursts[-1][1])
+                    if times:
+                        lo, hi = bursts[0][0], bursts[-1][1] + 0.05
+                        times = [(max(s, lo), min(max(e, s + 0.04), hi)) for s, e in times]
+                if not times:
+                    times = spread_on_bursts(toks, bursts)
+                fixed, prev = [], bursts[0][0]
+                for s, e in times:
+                    s = max(s, prev)
+                    fixed.append([s, max(e, s + 0.05)])
+                    prev = s
+                for k in range(len(fixed) - 1):
+                    if fixed[k + 1][0] - fixed[k][1] <= 0.25:         # the box stays on a word until the next one starts, unless a real pause is longer
+                        fixed[k][1] = max(fixed[k + 1][0], fixed[k][0] + 0.05)
+                    fixed[k][1] = min(fixed[k][1], max(fixed[k + 1][0], fixed[k][0] + 0.05))
+                first = fixed[0][0]
+                pre = [re.sub(r"[^A-Za-z0-9'!?&-]", "", p).upper() for p in prefix]
+                pre = [p for p in pre if p]
+                if pre:                                               # a speaker name that is shown but not spoken: a short slot just before the speech
+                    slot = min(0.4, max(first, 0.15)) / len(pre)
+                    base = max(first - slot * len(pre), 0.0)
+                    for n, p in enumerate(pre):
+                        res.append((p, cursor + base + n * slot, cursor + base + (n + 1) * slot))
+                for w, (s, e) in zip(toks, fixed):
+                    res.append((w, cursor + s, cursor + e))
+            cursor += dur
+        if res:
+            CAPTION_TIMING[tag] = res
+    except Exception as e:
+        print(f"::warning::caption timing could not be measured ({e}) - using the estimate")
+        CAPTION_TIMING.pop(tag, None)
+
+
 def shorts_caption_filters(text, duration, tmp, tag):
     """CapCut-style captions: the phrase stays on screen in white and a yellow box moves to the word being spoken."""
     words = []
@@ -470,13 +666,19 @@ def shorts_caption_filters(text, duration, tmp, tag):
     gap = size * 0.28
     cap_h = size * 0.74                      # measured: capitals are 0.74 x the font size high
     pitch = size * 1.08
-    speech = max(duration - SCENE_TAIL_SECONDS, 0.5)
-    weights = [len(w) + 2 + (3 if stop else 0) for w, stop in words]      # a word that ends a sentence or a comma gets a short pause
-    total = float(sum(weights)) or 1.0
-    t, spans = 0.0, []
-    for wt in weights:
-        spans.append((t, t + speech * wt / total))
-        t += speech * wt / total
+    timed = CAPTION_TIMING.get(tag)
+    if timed and [t[0] for t in timed] == [w for w, _ in words]:
+        spans = [(max(s - CAPTION_LEAD, 0.0), min(e, duration)) for (_, s, e) in timed]
+        spans = [(s, max(e, s + 0.05)) for s, e in spans]
+    else:
+        # fallback estimate (only when no real timing is known): syllable weights over the spoken part of the scene
+        speech = max(duration - SCENE_TAIL_SECONDS, 0.5)
+        weights = [_weight(w) for w, stop in words]
+        total = float(sum(weights)) or 1.0
+        t, spans = 0.0, []
+        for wt in weights:
+            spans.append((t, t + speech * wt / total))
+            t += speech * wt / total
     # 1) group the words into screens of up to SHORTS_WORDS words (a screen also ends after . , ! ? ; :) with at most 2 lines
     def layout(group):
         lines, cur, cur_w = [], [], 0.0
@@ -510,6 +712,9 @@ def shorts_caption_filters(text, duration, tmp, tag):
         block_h = (len(lines) - 1) * pitch + cap_h
         top = HEIGHT * SHORTS_Y - block_h / 2.0
         c0, c1 = spans[group[0]][0], spans[group[-1]][1]
+        c1 = c1 + (0.25 if g + 1 < len(groups) else 0.2)      # the white phrase stays a moment after its last word
+        if g + 1 < len(groups):
+            c1 = min(c1, spans[groups[g + 1][0]][0])
         boxes, texts = [], []
         for li, line in enumerate(lines):
             widths = [_cap_word_width(words[i][0], size) for i in line]
@@ -1301,6 +1506,17 @@ def main():
                 )
 
                 segment_path = os.path.join(tmp, f"segment_{i:03d}.mp4")
+
+                # v67: real word times of this scene's voice, for the yellow box
+                if SUBTITLES and SHORTS_CAPTIONS and HEIGHT > WIDTH and audio_parts:
+                    pres = [([] if l["speaker"] == "NARRATOR" else f'{l["speaker"].title()}:'.split()) for l in sub_lines]
+                    if len(audio_parts) == len(sub_lines):
+                        blocks = [(p, pr, l["text"]) for p, pr, l in zip(audio_parts, pres, sub_lines)]
+                    else:
+                        blocks = [(scene_audio_path, [x for pr in pres for x in pr], " ".join(l["text"] for l in sub_lines))]
+                    prepare_caption_timing(f"s{i:03d}", blocks)
+                    if f"s{i:03d}" in CAPTION_TIMING:
+                        CAPTION_TIMING[f"c{i:03d}"] = CAPTION_TIMING[f"s{i:03d}"]
 
                 # 1) animated clip, if n8n gave us one for this scene
                 built = False
