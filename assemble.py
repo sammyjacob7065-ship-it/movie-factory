@@ -5,6 +5,8 @@ assemble.py - Betrayer episode assembler (polished version).
 Polish added on top of the original pipeline:
   - images are fitted to the 9:16 frame on a blurred background (no stretching)
   - smooth eased zoom/pan, six different camera moves in rotation scene by scene
+  - v68: cinema mode - 2.5D depth parallax camera (push, pull, truck, orbit, crane, roll) read from each scene's CAMERA line, and real transitions
+    (zoom-through, whip, spin, light flash, dark push, passing-object wipe, dissolve) read from its TRANSITION line
   - timed subtitles in short chunks (not one giant block)
   - soft fades between scenes
   - consistent audio format per scene (no glitches on join)
@@ -815,6 +817,557 @@ def watermark_filter():
     return ["drawtext=" + ":".join(parts)]
 
 
+# ---------------- CINEMA CAMERA: 2.5D depth parallax + film transitions (v68) ----------------
+# Every still picture gets a depth map (what is near, what is far). The camera then really moves THROUGH the picture:
+# near things slide/grow more than far things (parallax), far things go soft (depth of field), and the end of each scene
+# is turned into a real transition into the next picture (zoom-through, whip, spin, light flash, dark push, passing-object wipe, dissolve).
+# Needs: pip install numpy opencv-python-headless onnxruntime   (without them the film is built the old way, nothing breaks)
+CINEMA = True                  # False = the older slow zoom on every scene (a manifest with "cinema": false does the same)
+CINEMA_TRANSITION_SECONDS = 0.55   # length of the transition at the end of a scene
+CINEMA_PARALLAX = 0.065        # sideways travel of the nearest parts, as a share of the picture width (bigger = more 3D but more stretching)
+CINEMA_SOFT_EDGE = 70.0        # bigger number = sharper depth edges (more 3D, more tearing); smaller = softer, safer
+CINEMA_BASE_ZOOM = 1.18        # the picture is enlarged this much so the camera can move without showing edges
+CINEMA_DOF = True              # far parts (and a very near foreground) go soft, like a real lens
+CINEMA_GRAIN = 0.03            # film grain strength (0 = off)
+CINEMA_VIGNETTE = 0.22         # dark corners (0 = off)
+CINEMA_WHOOSH = True           # a quiet whoosh / boom is added at each transition
+CINEMA_DEPTH_URLS = ["https://github.com/isl-org/MiDaS/releases/download/v2_1/model-small.onnx"]   # free depth model (runs on the CPU)
+CINEMA_AUTO_CAMERAS = [["push"], ["truck_r", "push"], ["orbit_l"], ["crane_up", "push"], ["pull"], ["orbit_r", "push"], ["truck_l"], ["crane_down", "pull"]]
+CINEMA_AUTO_TRANSITIONS = ["push_through", "whip", "dissolve", "flash", "spin", "cover"]
+try:
+    import numpy as np
+    import cv2
+    _CIN_LIBS = True
+except Exception:
+    _CIN_LIBS = False
+_CIN = {"sess": None, "tried": False, "states": {}}
+
+_CAM_DELTA = {
+    "push": {"zoom": 0.05, "dz": 0.22}, "pull": {"zoom": -0.05, "dz": -0.22},
+    "truck_l": {"tx": -1.0}, "truck_r": {"tx": 1.0},
+    "orbit_l": {"tx": -1.25, "roll": 1.6, "zoom": 0.025}, "orbit_r": {"tx": 1.25, "roll": -1.6, "zoom": 0.025},
+    "crane_up": {"ty": -1.0, "zoom": 0.02}, "crane_down": {"ty": 1.0, "zoom": 0.02},
+    "roll_l": {"roll": -5.0, "zoom": 0.06}, "roll_r": {"roll": 5.0, "zoom": 0.06},
+}
+_CAM_WORDS = [
+    ("orbit", r"orbit\w*|circl\w*|\barcs?\b|\barcing\b|curved|revolv\w*|rotate around|around (?:him|her|them|the)"),
+    ("push", r"dolly|\bpush\w*|(?:travel|move|moves|moving|glide|glides|gliding|go|goes)\s+forward|\bforward\b|\bcloser\b|\btoward\w*|zoom\w*\s+in|\bcreep\w*|\bapproach\w*"),
+    ("pull", r"pull\w*\s+(?:back|away|out)|\bpulls?\b|\bpulling\b|\bbackwards?\b|zoom\w*\s+out|\bretreat\w*"),
+    ("truck", r"\bpan\w*|\btrack\w*|sideways|lateral\w*|\bslid\w+|\bslide\w*|\btruck\w*|\bpast\b|\bacross\b"),
+    ("crane_up", r"\bcrane\w*|\brise\w*|\brising\b|upward\w*|tilt\w*\s+up|ascend\w*|\blift\w*"),
+    ("crane_down", r"descend\w*|downward\w*|tilt\w*\s+down|\blower\w*|\bsink\w*"),
+    ("roll", r"\broll\w*|\bdutch\b|\btilted\b|\brotat\w*|\bspin\w*|\btwist\w*"),
+]
+
+
+def _cin_side(window, idx, k):
+    w = window.lower()
+    if re.search(r"counter|anti-?clockwise|\bleft\b", w):
+        return "l"
+    if re.search(r"clockwise|\bright\b", w):
+        return "r"
+    return "r" if (idx + k) % 2 == 0 else "l"
+
+
+def parse_camera(text, idx):
+    """CAMERA line -> up to 3 camera moves in the order they are written. [(name, strength)]"""
+    t = (text or "").lower()
+    found = []
+    for name, pat in _CAM_WORDS:
+        for m in re.finditer(pat, t):
+            found.append((m.start(), name))
+    found.sort()
+    moves, last = [], {}
+    for pos, name in found:
+        if name in last and pos - last[name] < 60:
+            continue
+        last[name] = pos
+        k = len(moves)
+        win = t[max(0, pos - 30): pos + 60]
+        if name in ("push", "pull"):
+            moves.append(name)
+        elif name == "truck":
+            moves.append("truck_" + _cin_side(win, idx, k))
+        elif name == "orbit":
+            moves.append("orbit_" + _cin_side(win, idx, k))
+        elif name == "roll":
+            moves.append("roll_" + _cin_side(win, idx, k))
+        else:
+            moves.append(name)
+        if len(moves) >= 3:
+            break
+    if not moves:
+        moves = list(CINEMA_AUTO_CAMERAS[idx % len(CINEMA_AUTO_CAMERAS)])
+    strength = 1.0
+    if re.search(r"\bslow\w*|\bgentle\w*|\bsubtle\w*|\bbarely\b", t):
+        strength = 0.8
+    if re.search(r"\bfast\b|\brapid\w*|\bsudden\w*|\bdramatic\w*|\baccelerat\w*|\baggressive\w*|\bsweep\w*", t):
+        strength = 1.3
+    return moves, strength
+
+
+def parse_transition(text, idx):
+    """TRANSITION line -> (kind, direction). kind: dark_push, cover, dissolve, whip, spin, flash, push_through."""
+    t = (text or "").lower()
+    d = None
+    if re.search(r"\bleft\b", t):
+        d = "l"
+    elif re.search(r"\bright\b", t):
+        d = "r"
+    elif re.search(r"\bup(?:ward)?\b|\babove\b", t):
+        d = "u"
+    elif re.search(r"\bdown(?:ward)?\b|\bbelow\b", t):
+        d = "d"
+    if d is None:
+        d = "l" if idx % 2 == 0 else "r"
+    if not t.strip():
+        return CINEMA_AUTO_TRANSITIONS[idx % len(CINEMA_AUTO_TRANSITIONS)], d
+    if re.search(r"dark|black|void|shadow", t) and re.search(r"\bpush\w*|expand\w*|swallow\w*|engulf\w*", t):
+        return "dark_push", d
+    if re.search(r"match.?cut|dissolve|melt|morph|cross.?fade|blend", t):
+        return "dissolve", d
+    if re.search(r"vehicle|passing|foreground (?:wipe|object)|\bbus\b|\btruck passes", t):
+        return "cover", d
+    if re.search(r"whip|swipe|\bpan\b|wipe|sweep|track(?:s|ing)? across|slide|rapid(?:ly)? (?:pan|move)", t):
+        return "whip", d
+    if re.search(r"spin|rotat|\broll|twist|spiral|swirl|orbit", t):
+        return "spin", d
+    if re.search(r"flash|flare|bright|glow|burst|explo|sunlight|light fill|light rays?", t):
+        return "flash", d
+    if re.search(r"push|zoom|through|\binto\b|dive|plunge|dolly", t):
+        return "push_through", d
+    return "dissolve", d
+
+
+def _ease(x):
+    x = min(max(x, 0.0), 1.0)
+    return x * x * (3 - 2 * x)
+
+
+def cin_pose_at(moves, strength, t):
+    """The camera position at time t (0..1 of the scene)."""
+    pose = {"tx": 0.0, "ty": 0.0, "zoom": 0.0, "dz": 0.0, "roll": 0.0}
+    n = len(moves)
+    slices = {1: [(0.0, 1.0)], 2: [(0.0, 0.62), (0.38, 1.0)], 3: [(0.0, 0.46), (0.3, 0.76), (0.54, 1.0)]}[n]
+    for name, (a, b) in zip(moves, slices):
+        delta = _CAM_DELTA[name]
+        u = _ease((t - a) / (b - a))
+        for key, val in delta.items():
+            val = val * strength
+            pose[key] += val * u
+            if val < 0 and key in ("zoom", "dz"):   # a pull-back starts from the big (zoomed in) value and comes down
+                pose[key] += -val
+    pose["tx"] = max(-1.7, min(1.7, pose["tx"]))
+    pose["ty"] = max(-1.3, min(1.3, pose["ty"]))
+    pose["roll"] = max(-7.0, min(7.0, pose["roll"]))
+    return pose
+
+
+def _cin_session(tmp):
+    if _CIN["tried"]:
+        return _CIN["sess"]
+    _CIN["tried"] = True
+    try:
+        import onnxruntime as ort
+    except Exception:
+        print("::warning::onnxruntime is not installed - the camera uses a simple depth guess (add onnxruntime to the pip install line for real depth)")
+        return None
+    path = os.path.join(os.environ.get("CINEMA_MODEL_DIR") or tmp, "depth_midas_small.onnx")
+    try:
+        if not (os.path.exists(path) and os.path.getsize(path) > 10_000_000):
+            ok = False
+            for url in CINEMA_DEPTH_URLS:
+                try:
+                    r = requests.get(url, timeout=(20, 300), allow_redirects=True)
+                    if r.status_code == 200 and len(r.content) > 10_000_000:
+                        with open(path, "wb") as f:
+                            f.write(r.content)
+                        ok = True
+                        break
+                except Exception as e:
+                    print(f"::warning::depth model download failed ({e})")
+            if not ok:
+                return None
+        _CIN["sess"] = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+        print("depth model loaded")
+    except Exception as e:
+        print(f"::warning::depth model could not start ({e}) - using a simple depth guess")
+        _CIN["sess"] = None
+    return _CIN["sess"]
+
+
+def _cin_fake_depth(img):
+    """Fallback when there is no depth model: lower parts are nearer, the centre of interest is nearer."""
+    h, w = img.shape[:2]
+    yy = np.linspace(0, 1, h, dtype=np.float32)[:, None] * np.ones((1, w), np.float32)
+    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    detail = cv2.GaussianBlur(np.abs(g - cv2.GaussianBlur(g, (0, 0), 6)), (0, 0), max(h, w) / 25.0)
+    detail = detail / (detail.max() + 1e-6)
+    xx = (np.linspace(-1, 1, w, dtype=np.float32)[None, :] * np.ones((h, 1), np.float32))
+    centre = np.exp(-(xx ** 2) / 0.35 - ((yy - 0.55) ** 2) / 0.25)
+    return 0.35 * yy + 0.35 * detail + 0.30 * centre
+
+
+def cin_depth(img, tmp):
+    """Depth of a picture, 0 = far ... 1 = near."""
+    h, w = img.shape[:2]
+    d = None
+    sess = _cin_session(tmp)
+    if sess is not None:
+        try:
+            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+            x = cv2.resize(rgb, (256, 256), interpolation=cv2.INTER_AREA)
+            x = (x - np.array([0.485, 0.456, 0.406], np.float32)) / np.array([0.229, 0.224, 0.225], np.float32)
+            x = np.ascontiguousarray(x.transpose(2, 0, 1)[None].astype(np.float32))
+            out = sess.run(None, {sess.get_inputs()[0].name: x})[0]
+            d = cv2.resize(np.squeeze(out).astype(np.float32), (w, h), interpolation=cv2.INTER_CUBIC)
+        except Exception as e:
+            print(f"::warning::depth estimation failed ({e}) - using a simple depth guess")
+            d = None
+    if d is None:
+        d = _cin_fake_depth(img)
+    lo, hi = np.percentile(d, [2, 98])
+    d = np.clip((d - lo) / max(hi - lo, 1e-6), 0, 1).astype(np.float32)
+    d = cv2.bilateralFilter(d, 9, 0.08, 15)
+    d = cv2.GaussianBlur(d, (0, 0), max(h, w) / 160.0)
+    return np.clip(d, 0, 1).astype(np.float32)
+
+
+def _cin_dof(img, D):
+    if not CINEMA_DOF:
+        return img
+    sc = img.shape[1] / 1080.0
+    b1 = cv2.GaussianBlur(img, (0, 0), 2.5 * sc).astype(np.float32)
+    b2 = cv2.GaussianBlur(img, (0, 0), 6.0 * sc).astype(np.float32)
+    far = np.clip((0.38 - D) / 0.38, 0, 1) * 1.5
+    near = np.clip((D - 0.9) / 0.1, 0, 1) * 1.2
+    lvl = np.maximum(far, near)
+    w0 = np.clip(1 - lvl, 0, 1)[..., None]
+    w1 = np.clip(1 - np.abs(lvl - 1), 0, 1)[..., None]
+    w2 = np.clip(lvl - 1, 0, 1)[..., None]
+    out = img.astype(np.float32) * w0 + b1 * w1 + b2 * w2
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+class _CinState:
+    pass
+
+
+def cin_state(scene_index, image_path, tmp):
+    st = _CIN["states"].get(scene_index)
+    if st is not None:
+        return st
+    composite = os.path.join(tmp, f"cinecomp_{scene_index:03d}.png")
+    build_composite(image_path, composite)
+    img = cv2.imread(composite)
+    if img is None:
+        raise RuntimeError("cinema: the picture could not be read")
+    if img.shape[1] != WIDTH or img.shape[0] != HEIGHT:
+        img = cv2.resize(img, (WIDTH, HEIGHT), interpolation=cv2.INTER_AREA)
+    st = _CinState()
+    st.W, st.H = WIDTH, HEIGHT
+    st.D = cin_depth(img, tmp)
+    st.src = _cin_dof(img, st.D)
+    st.Dd = (0.25 + 0.6 * cv2.GaussianBlur(st.D, (0, 0), max(WIDTH, HEIGHT) / CINEMA_SOFT_EDGE)).astype(np.float32)   # softened + compressed depth that drives the camera shifts
+    st.cx, st.cy = WIDTH / 2.0, HEIGHT / 2.0
+    xs = np.arange(WIDTH, dtype=np.float32) - st.cx
+    ys = np.arange(HEIGHT, dtype=np.float32) - st.cy
+    st.Xr = np.ascontiguousarray(np.broadcast_to(xs[None, :], (HEIGHT, WIDTH)))
+    st.Yr = np.ascontiguousarray(np.broadcast_to(ys[:, None], (HEIGHT, WIDTH)))
+    for k in [k for k in _CIN["states"] if k < scene_index - 1]:
+        del _CIN["states"][k]
+    _CIN["states"][scene_index] = st
+    return st
+
+
+def cin_render(st, pose):
+    """One frame of the picture seen from the camera position `pose`.
+    The shifts follow a softened copy of the depth (st.Dd): hard depth edges would tear faces and buildings apart."""
+    Dd = st.Dd
+    ang = math.radians(pose["roll"])
+    c, s = math.cos(ang), math.sin(ang)
+    xr = st.Xr * c - st.Yr * s
+    yr = st.Xr * s + st.Yr * c
+    inv = 1.0 / (CINEMA_BASE_ZOOM + pose["zoom"] + pose["dz"] * Dd)
+    par = Dd - 0.2
+    mx = (xr * inv + st.cx + (pose["tx"] * CINEMA_PARALLAX * st.W) * par).astype(np.float32)
+    my = (yr * inv + st.cy + (pose["ty"] * CINEMA_PARALLAX * st.H * 0.55) * par).astype(np.float32)
+    return cv2.remap(st.src, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+
+
+# ---- transitions: blend the last frames of scene A into the first picture of scene B ----
+def _zoom_img(img, scale, cx=None, cy=None):
+    h, w = img.shape[:2]
+    cx = w / 2.0 if cx is None else cx
+    cy = h / 2.0 if cy is None else cy
+    M = np.array([[scale, 0, cx - scale * cx], [0, scale, cy - scale * cy]], np.float32)
+    return cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+
+
+def _zoom_blur(img, amount, n=6):
+    if amount <= 0.004:
+        return img
+    acc = np.zeros(img.shape, np.float32)
+    for k in range(n):
+        acc += _zoom_img(img, 1.0 + amount * k / (n - 1)).astype(np.float32)
+    return (acc / n).astype(np.uint8)
+
+
+def _rot_img(img, deg, scale):
+    h, w = img.shape[:2]
+    M = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), deg, scale)
+    return cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+
+
+def _rot_blur(img, deg, scale, spread, n=5):
+    if abs(spread) < 0.3:
+        return _rot_img(img, deg, scale)
+    acc = np.zeros(img.shape, np.float32)
+    for k in range(n):
+        acc += _rot_img(img, deg + spread * (k / (n - 1) - 0.5), scale).astype(np.float32)
+    return (acc / n).astype(np.uint8)
+
+
+def _mix(a, b, alpha):
+    if alpha <= 0:
+        return a
+    if alpha >= 1:
+        return b
+    return cv2.addWeighted(a, 1.0 - alpha, b, alpha, 0)
+
+
+def tr_dissolve(A, B, p, d):
+    e = _ease(p)
+    return _mix(_zoom_img(A, 1.0 + 0.04 * e), B, e)
+
+
+def tr_whip(A, B, p, d):
+    e = 1 - (1 - p) ** 2.2                      # fast start, soft landing
+    h, w = A.shape[:2]
+    if d in ("l", "r"):
+        strip = np.hstack([A, B]) if d == "l" else np.hstack([B, A])
+        off = int(round(e * w)) if d == "l" else int(round((1 - e) * w))
+        out = strip[:, off: off + w]
+        k = int(2 + 0.18 * w * math.sin(math.pi * min(max(p, 0), 1)) ** 1.2) | 1
+        return cv2.blur(out, (k, 1)) if k > 3 else out
+    strip = np.vstack([A, B]) if d == "u" else np.vstack([B, A])
+    off = int(round(e * h)) if d == "u" else int(round((1 - e) * h))
+    out = strip[off: off + h]
+    k = int(2 + 0.18 * h * math.sin(math.pi * min(max(p, 0), 1)) ** 1.2) | 1
+    return cv2.blur(out, (1, k)) if k > 3 else out
+
+
+def tr_push_through(A, B, p, d):
+    e = _ease(p)
+    a = _zoom_blur(_zoom_img(A, 1.0 + 2.6 * e * e), 0.30 * math.sin(math.pi * min(p * 1.15, 1.0)))
+    bs = 0.62 + 0.38 * e
+    b = _zoom_blur(_zoom_img(B, bs), 0.22 * (1 - p))
+    return _mix(a, b, _ease((p - 0.30) / 0.45))
+
+
+def tr_dark_push(A, B, p, d):
+    e = _ease(p)
+    a = _zoom_img(A, 1.0 + 1.3 * e)
+    a = cv2.convertScaleAbs(a, alpha=max(0.0, 1.0 - _ease(p / 0.6)))
+    bq = _ease((p - 0.45) / 0.55)
+    b = _zoom_img(B, 1.0 + 0.25 * (1 - bq))
+    b = cv2.convertScaleAbs(b, alpha=bq)
+    return cv2.add(a, b)
+
+
+def tr_flash(A, B, p, d):
+    white = np.empty_like(A)
+    white[:] = (205, 235, 255)
+    if p < 0.5:
+        return _mix(_zoom_img(A, 1.0 + 0.08 * p), white, _ease(p / 0.5))
+    return _mix(white, _zoom_img(B, 1.0 + 0.06 * (1 - p)), _ease((p - 0.5) / 0.5))
+
+
+def tr_spin(A, B, p, d):
+    sgn = 1.0 if d in ("l", "u") else -1.0
+    uA, uB = _ease(p / 0.5), _ease((p - 0.5) / 0.5)
+    a = _rot_blur(A, sgn * 70 * uA, 1.0 + 0.9 * uA, 26 * math.sin(math.pi * min(uA, 1)) * sgn)
+    b = _rot_blur(B, -sgn * 70 * (1 - uB), 1.0 + 0.9 * (1 - uB), 26 * math.sin(math.pi * min(1 - uB, 1)) * -sgn)
+    return _mix(a, b, _ease((p - 0.42) / 0.16))
+
+
+def tr_cover(A, B, p, d):
+    flip = d in ("l", "u")
+    if flip:
+        A, B = A[:, ::-1], B[:, ::-1]
+    h, w = A.shape[:2]
+    bw = 0.62 * w
+    left = _ease(p) * (w + bw) - bw
+    x = np.arange(w, dtype=np.float32)
+    centre = left + bw / 2.0
+    mB = np.clip((centre - x) / (0.12 * w) + 0.5, 0, 1)[None, :, None]
+    band = np.clip(1.0 - np.abs(x - centre) / (bw / 2.0), 0, 1) ** 0.35
+    dark = (1.0 - 0.93 * band)[None, :, None]
+    out = (A.astype(np.float32) * (1 - mB) + B.astype(np.float32) * mB) * dark
+    out = np.clip(out, 0, 255).astype(np.uint8)
+    k = int(2 + 0.05 * w * math.sin(math.pi * min(max(p, 0), 1))) | 1
+    if k > 3:
+        out = cv2.blur(out, (k, 1))
+    return np.ascontiguousarray(out[:, ::-1]) if flip else out
+
+
+_TRANSITIONS = {"dissolve": tr_dissolve, "whip": tr_whip, "push_through": tr_push_through, "dark_push": tr_dark_push,
+                "flash": tr_flash, "spin": tr_spin, "cover": tr_cover}
+
+
+def cin_finish_tools(W, H):
+    """Vignette and film grain, prepared once."""
+    tools = {}
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    r = np.sqrt(((xx - W / 2) / (W / 2)) ** 2 + ((yy - H / 2) / (H / 2)) ** 2) / math.sqrt(2)
+    v = np.clip(1.0 - CINEMA_VIGNETTE * r ** 2.2, 0, 1)
+    tools["vig"] = np.repeat((v * 255).astype(np.uint8)[:, :, None], 3, axis=2)
+    rng = np.random.RandomState(7)
+    tools["grain"] = [(rng.randn(H, W, 1) * CINEMA_GRAIN * 255).astype(np.int16) for _ in range(6)]
+    xs = np.arange(256, dtype=np.float32) / 255.0
+    lut = np.clip(0.5 + (xs - 0.5) * 1.06 + 0.012, 0, 1)         # a touch more contrast
+    tools["lut"] = (lut * 255).astype(np.uint8)
+    return tools
+
+
+def cin_finish(frame, tools, k):
+    if CINEMA_VIGNETTE > 0:
+        frame = cv2.multiply(frame, tools["vig"], scale=1 / 255.0)
+    frame = cv2.LUT(frame, tools["lut"])
+    if CINEMA_GRAIN > 0:
+        frame = np.clip(frame.astype(np.int16) + tools["grain"][k % 6], 0, 255).astype(np.uint8)
+    return frame
+
+
+def _whoosh_audio(audio_path, duration, td, kind, tmp, tag):
+    """The scene's voice plus a quiet whoosh (and a low boom for flashes and dark pushes) at the transition."""
+    out = os.path.join(tmp, f"{tag}_whoosh.wav")
+    t0 = max(duration - td - 0.05, 0.0)
+    ms = int(t0 * 1000)
+    parts = [f"[1:a]afade=t=in:d=0.30:curve=qsin,afade=t=out:st=0.30:d=0.40:curve=exp,highpass=f=350,lowpass=f=7000,volume=0.20,adelay={ms}:all=1[w]"]
+    inputs = ["-i", audio_path, "-f", "lavfi", "-t", "0.8", "-i", "anoisesrc=d=0.8:c=pink:a=0.6:r=44100"]
+    mix = "[0:a][w]"
+    n = 2
+    if kind in ("flash", "dark_push", "push_through"):
+        parts.append(f"[2:a]afade=t=out:st=0.10:d=0.50:curve=exp,volume=0.30,adelay={ms + int(td * 450)}:all=1[b]")
+        inputs += ["-f", "lavfi", "-t", "0.7", "-i", "sine=f=48:d=0.7:r=44100"]
+        mix += "[b]"
+        n = 3
+    fc = ";".join(parts) + f";{mix}amix=inputs={n}:duration=first:dropout_transition=0:normalize=0[o]"
+    try:
+        run(["ffmpeg", "-y"] + inputs + ["-filter_complex", fc, "-map", "[o]", "-ar", "44100", "-ac", "2", out])
+        return out
+    except Exception:
+        try:
+            run(["ffmpeg", "-y"] + inputs + ["-filter_complex", fc.replace(":normalize=0", ""), "-map", "[o]", "-ar", "44100", "-ac", "2", out])
+            return out
+        except Exception as e:
+            print(f"::warning::transition sound skipped ({e})")
+            return audio_path
+
+
+def _script_blocks(manifest):
+    """Optional: if the manifest carries the whole script text, read each scene's CAMERA / TRANSITION lines from it."""
+    found = {}
+    texts = []
+    for key in ("script", "script_text", "scriptText", "prompt", "raw_script", "story"):
+        v = manifest.get(key)
+        if isinstance(v, str) and len(v) > 200:
+            texts.append(v)
+    for text in texts:
+        for m in re.finditer(r"(?im)^\s*\**\s*SCENE\s+(\d+)\s*[:\-]?\**\s*$(.*?)(?=^\s*\**\s*SCENE\s+\d+\s*[:\-]?\**\s*$|\Z)", text, re.S):
+            n = int(m.group(1))
+            body = m.group(2)
+            cam = re.search(r"(?im)^\s*CAMERA\s*:\s*(.+?)(?=^\s*[A-Z_ ]{3,20}\s*:|\Z)", body, re.S)
+            tr = re.search(r"(?im)^\s*TRANSITION\s*:\s*(.+?)(?=^\s*[A-Z_ ]{3,20}\s*:|\Z)", body, re.S)
+            d = found.setdefault(n, {})
+            if cam:
+                d["camera"] = cam.group(1).strip()
+            if tr:
+                d["transition"] = tr.group(1).strip()
+        if found:
+            break
+    return found
+
+
+def _scene_field(scene, names):
+    for n in names:
+        v = scene.get(n) if isinstance(scene, dict) else None
+        if isinstance(v, str) and v.strip():
+            return v
+    return ""
+
+
+def cinema_plan(idx, scene, meta):
+    cam = _scene_field(scene, ("camera", "camera_movement", "camera_motion", "camera_direction", "camera_text")) or (meta or {}).get("camera", "")
+    tr = _scene_field(scene, ("transition", "transition_out", "transition_text", "transition_note")) or (meta or {}).get("transition", "")
+    moves, strength = parse_camera(cam, idx)
+    kind, d = parse_transition(tr, idx)
+    return {"moves": moves, "strength": strength, "kind": kind, "dir": d, "cam_text": cam, "tr_text": tr}
+
+
+def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, segment_path,
+                         plan, next_image=None, next_plan=None, is_first=False, is_last=False):
+    """One scene with the 2.5D camera. The last frames melt into the first picture of the next scene (when there is one)."""
+    st = cin_state(scene_index, image_path, tmp)
+    nst = cin_state(scene_index + 1, next_image, tmp) if next_image and next_plan else None
+    N = max(int(round(duration * FPS)), 2)
+    td = min(CINEMA_TRANSITION_SECONDS, duration * 0.4) if nst is not None else 0.0
+    TN = int(round(td * FPS))
+    tfun = _TRANSITIONS.get(plan["kind"], tr_dissolve)
+    tools = cin_finish_tools(WIDTH, HEIGHT)
+    B0 = None
+    if nst is not None:
+        B0 = cin_render(nst, cin_pose_at(next_plan["moves"], next_plan["strength"], 0.0))
+    audio_in = audio_path
+    if nst is not None and CINEMA_WHOOSH:
+        audio_in = _whoosh_audio(audio_path, duration, td, plan["kind"], tmp, f"s{scene_index:03d}")
+
+    fade_out_start = max(duration - FADE_SECONDS, 0)
+    vf_parts = []
+    vf_parts += subtitle_filters(sub_text, duration, tmp, f"s{scene_index:03d}")
+    vf_parts += watermark_filter()
+    if is_first:
+        vf_parts.append(f"fade=t=in:st=0:d={FADE_SECONDS}")
+    if is_last or nst is None:
+        vf_parts.append(f"fade=t=out:st={fade_out_start:.3f}:d={FADE_SECONDS}")
+    vf_parts.append("format=yuv420p")
+    af = (f"afade=t=in:st=0:d=0.2,afade=t=out:st={max(duration - 0.25, 0):.3f}:d=0.25,apad")
+    log_path = os.path.join(tmp, f"cin_{scene_index:03d}.log")
+    cmd = ["ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{WIDTH}x{HEIGHT}", "-framerate", str(FPS), "-i", "pipe:0",
+           "-i", audio_in, "-vf", ",".join(vf_parts), "-af", af,
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", str(VIDEO_CRF), "-maxrate", VIDEO_MAXRATE, "-bufsize", "6M",
+           "-pix_fmt", "yuv420p", "-r", str(FPS), "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+           "-t", f"{duration:.3f}", segment_path]
+    with open(log_path, "w") as lg:
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=lg, stderr=lg)
+        try:
+            for k in range(N):
+                t = k / float(N - 1)
+                frame = cin_render(st, cin_pose_at(plan["moves"], plan["strength"], t))
+                if TN and k >= N - TN:
+                    p = (k - (N - TN) + 1) / float(TN)
+                    frame = tfun(frame, B0, p, plan["dir"])
+                frame = cin_finish(frame, tools, k)
+                proc.stdin.write(np.ascontiguousarray(frame).tobytes())
+            proc.stdin.close()
+        except Exception as e:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            tail = ""
+            try:
+                tail = open(log_path).read()[-400:]
+            except Exception:
+                pass
+            raise RuntimeError(f"cinema render failed: {e} {tail}")
+        rc = proc.wait()
+    if rc != 0:
+        raise RuntimeError("cinema ffmpeg failed: " + open(log_path).read()[-400:])
+    print(f"scene {scene_index}: camera {'+'.join(plan['moves'])}" + (f", transition {plan['kind']} ({plan['dir']})" if nst is not None else ", ends with a fade"))
+
+
 def build_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, segment_path):
     """One scene: composite image + eased zoom + subtitles + fades + audio."""
     composite = os.path.join(tmp, f"composite_{scene_index:03d}.png")
@@ -1416,6 +1969,13 @@ def main():
         SUBTITLES = manifest.get("subtitles", True) is not False or _asp == "9:16"   # vertical films always get the CapCut-style captions
     print(f"Output {WIDTH}x{HEIGHT}, subtitles {'on' if SUBTITLES else 'off'}")
     episode_id = manifest["episodeId"]
+    script_meta = {}
+    try:
+        script_meta = _script_blocks(manifest) if _CIN_LIBS else {}
+    except Exception:
+        script_meta = {}
+    cinema_on = CINEMA and _CIN_LIBS and manifest.get("cinema", True) is not False
+    print(f"cinema camera: {'on' if cinema_on else 'off (needs numpy + opencv-python-headless + onnxruntime)'}")
 
     # animated clips offered by n8n: {scene_number: clip_url}
     clip_by_scene = {}
@@ -1553,12 +2113,32 @@ def main():
                     image_path = os.path.join(tmp, f"s{scene_num}.png")
                     image_url = image_by_scene.get(scene_num)
                     if image_url:
-                        download(image_url, image_path)
+                        if not os.path.exists(image_path):
+                            download(image_url, image_path)
                     else:
                         print(f"::warning::scene {scene_num} has no completed image, using a plain fallback")
                         run(["ffmpeg", "-y", "-f", "lavfi",
                              "-i", f"color=c=gray20:s={WIDTH}x{HEIGHT}", "-frames:v", "1", image_path])
-                    build_segment(i, image_path, scene_audio_path, duration, sub_text, tmp, segment_path)
+                    if cinema_on and image_url:
+                        try:
+                            plan = cinema_plan(i, scene, script_meta.get(int(scene_num)))
+                            nimg, nplan = None, None
+                            if i + 1 < len(scenes):
+                                nsc = scenes[i + 1]
+                                nn = int(nsc["scene_number"])
+                                nurl = image_by_scene.get(nn)
+                                if nurl and not clip_by_scene.get(nn):
+                                    nimg = os.path.join(tmp, f"s{nn}.png")
+                                    if not os.path.exists(nimg):
+                                        download(nurl, nimg)
+                                    nplan = cinema_plan(i + 1, nsc, script_meta.get(nn))
+                            build_cinema_segment(i, image_path, scene_audio_path, duration, sub_text, tmp, segment_path,
+                                                 plan, nimg, nplan, is_first=(i == 0), is_last=(i == len(scenes) - 1))
+                            built = True
+                        except Exception as e:
+                            print(f"::warning::scene {scene_num}: cinema camera not used ({e}) - using the slow zoom")
+                    if not built:
+                        build_segment(i, image_path, scene_audio_path, duration, sub_text, tmp, segment_path)
 
                 segment_paths.append(segment_path)
                 try:
