@@ -59,8 +59,9 @@ jobs:
             timeout 120 sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 install -y --no-install-recommends fonts-dejavu-core || echo "WARNING: could not install a font, captions may be missing"
           fi
 
+      # v68: numpy + opencv + onnxruntime switch on the cinema camera (2.5D depth parallax + transitions)
       - name: Install Python dependencies
-        run: pip install requests
+        run: pip install requests numpy opencv-python-headless onnxruntime
 
       - name: Assemble the episode
         env:
@@ -68,4 +69,5 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_BUCKET: ${{ secrets.SUPABASE_BUCKET }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}   # optional: exact word times for the yellow caption box (leave the secret out and it still works)
         run: python assemble.py
