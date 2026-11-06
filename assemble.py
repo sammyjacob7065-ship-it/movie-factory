@@ -1609,6 +1609,28 @@ def upload_to_release(path, episode_id, tmp):
     return url
 
 
+
+# ---- v70: a small playable copy goes to Supabase, so the Telegram link opens and plays in the browser like before ----
+PREVIEW_ENABLED = True
+PREVIEW_MAX_MB = 45          # stays under the Supabase Free 50 MB limit
+
+
+def upload_preview_copy(path, episode_id, tmp):
+    """A 720p copy under 45 MB at videos/<episodeId>-preview.mp4 (public). The full-quality film is not touched."""
+    small = os.path.join(tmp, "preview_small.mp4")
+    run(["ffmpeg", "-y", "-i", path, "-vf", "scale='min(720,iw)':-2", "-c:v", "libx264", "-preset", "veryfast", "-crf", "26",
+         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", small])
+    small = shrink_to_limit(small, tmp, PREVIEW_MAX_MB)
+    size_mb = os.path.getsize(small) / 1e6
+    print(f"uploading the preview copy to Supabase: {size_mb:.0f} MB")
+    with open(small, "rb") as f:
+        r = requests.post(f"{SUPABASE_URL}/storage/v1/object/{BUCKET}/videos/{episode_id}-preview.mp4",
+                          headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "video/mp4", "x-upsert": "true"},
+                          data=f, timeout=(30, 900))
+    r.raise_for_status()
+    return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/videos/{episode_id}-preview.mp4"
+
+
 def pick_thumbnail_scene(scenes, image_by_scene, manifest):
     """The most dramatic picture that does not give the ending away: an explicit manifest choice wins,
     otherwise the scene with the most characters + the strongest emotion; the last scene is skipped (spoilers)."""
@@ -2266,6 +2288,11 @@ def main():
                 except Exception as e:
                     print(f"::warning::GitHub upload not used ({e}) - using Supabase Storage")
                     public_url = None
+            if public_url and PREVIEW_ENABLED:
+                try:
+                    print("preview link: " + upload_preview_copy(final_path, episode_id, tmp))
+                except Exception as e:
+                    print(f"::warning::preview copy not uploaded ({e})")
             if not public_url:
                 try:
                     final_path = shrink_to_limit(final_path, tmp)
