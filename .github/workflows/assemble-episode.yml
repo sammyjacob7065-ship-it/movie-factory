@@ -14,6 +14,8 @@ concurrency:
 
 jobs:
   assemble:
+    permissions:
+      contents: write          # v69: lets the job publish the finished film as a GitHub Release (up to 2 GB)
     runs-on: ubuntu-latest
     timeout-minutes: 240   # a 30-minute film takes about 30-60 minutes to build; the old 60 was too tight
     steps:
@@ -69,5 +71,6 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_BUCKET: ${{ secrets.SUPABASE_BUCKET }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # v69: used to upload the finished film to a GitHub Release
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}   # optional: exact word times for the yellow caption box (leave the secret out and it still works)
         run: python assemble.py
