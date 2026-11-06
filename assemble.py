@@ -85,8 +85,8 @@ SFX_DUCK_RATIO = 2.5        # effects dip a little while the narrator speaks (1 
 SFX_MAX_EVENTS = 120        # most hits one repeating cue may place
 MUSIC_PATH = "assets/music/default.mp3"
 MUSIC_VOLUME = 5          # before ducking; it dips automatically under the voice (was 0.25: too quiet)
-VIDEO_CRF = 23              # lower = better quality, bigger file
-VIDEO_MAXRATE = "3M"        # caps file size
+VIDEO_CRF = 20              # lower = better quality, bigger file (v69: was 23)
+VIDEO_MAXRATE = "6M"        # caps file size (v69: was 3M, which made long films soft)
 CLIP_FILL_MODE = "hold"     # clip shorter than the scene's voice: "hold" its last frame (v64: never "loop" - looping made an action play twice)
 
 # ---- YOUTUBE THUMBNAIL (edit here) ----
@@ -828,7 +828,7 @@ CINEMA_PARALLAX = 0.065        # sideways travel of the nearest parts, as a shar
 CINEMA_SOFT_EDGE = 70.0        # bigger number = sharper depth edges (more 3D, more tearing); smaller = softer, safer
 CINEMA_BASE_ZOOM = 1.18        # the picture is enlarged this much so the camera can move without showing edges
 CINEMA_DOF = True              # far parts (and a very near foreground) go soft, like a real lens
-CINEMA_GRAIN = 0.03            # film grain strength (0 = off)
+CINEMA_GRAIN = 0.015           # film grain strength (0 = off)
 CINEMA_VIGNETTE = 0.22         # dark corners (0 = off)
 CINEMA_WHOOSH = True           # a quiet whoosh / boom is added at each transition
 CINEMA_DEPTH_URLS = ["https://github.com/isl-org/MiDaS/releases/download/v2_1/model-small.onnx"]   # free depth model (runs on the CPU)
@@ -1336,7 +1336,7 @@ def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text
     log_path = os.path.join(tmp, f"cin_{scene_index:03d}.log")
     cmd = ["ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{WIDTH}x{HEIGHT}", "-framerate", str(FPS), "-i", "pipe:0",
            "-i", audio_in, "-vf", ",".join(vf_parts), "-af", af,
-           "-c:v", "libx264", "-preset", "veryfast", "-crf", str(VIDEO_CRF), "-maxrate", VIDEO_MAXRATE, "-bufsize", "6M",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", str(VIDEO_CRF), "-maxrate", VIDEO_MAXRATE, "-bufsize", "12M",
            "-pix_fmt", "yuv420p", "-r", str(FPS), "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
            "-t", f"{duration:.3f}", segment_path]
     with open(log_path, "w") as lg:
@@ -1400,7 +1400,7 @@ def build_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, 
         "-i", audio_path,
         "-vf", vf, "-af", af,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", str(VIDEO_CRF),
-        "-maxrate", VIDEO_MAXRATE, "-bufsize", "6M", "-pix_fmt", "yuv420p", "-r", str(FPS),
+        "-maxrate", VIDEO_MAXRATE, "-bufsize", "12M", "-pix_fmt", "yuv420p", "-r", str(FPS),
         "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
         "-t", f"{duration:.3f}", segment_path,
     ])
@@ -1480,7 +1480,7 @@ def build_clip_segment(scene_index, clip_path, audio_path, duration, sub_text, t
         "-map", "[vout]", "-map", "1:a",
         "-af", af,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", str(VIDEO_CRF),
-        "-maxrate", VIDEO_MAXRATE, "-bufsize", "6M", "-pix_fmt", "yuv420p", "-r", str(FPS),
+        "-maxrate", VIDEO_MAXRATE, "-bufsize", "12M", "-pix_fmt", "yuv420p", "-r", str(FPS),
         "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
         "-t", f"{duration:.3f}", segment_path,
     ]
@@ -1519,6 +1519,95 @@ def master_audio_and_music(final_path, out_path):
 # ---------------------------------------------------------------- main
 
 # ---------------------------------------------------------------- YouTube thumbnail
+
+FINAL_MAX_MB = 47            # the finished film is squeezed to fit under this size before upload (Supabase Free allows 50 MB; 0 = never squeeze)
+
+
+def shrink_to_limit(path, tmp, limit_mb=None):
+    """If the film is bigger than FINAL_MAX_MB, re-encode the picture at a bitrate that fits (the sound is copied untouched)."""
+    limit_mb = limit_mb or FINAL_MAX_MB
+    size = os.path.getsize(path) / 1e6
+    if limit_mb <= 0 or size <= limit_mb:
+        return path
+    total = max(probe_duration(path), 1.0)
+    factor = 0.93
+    cur = path
+    for attempt in range(4):
+        vkbps = max(int(limit_mb * factor * 8000.0 / total) - 170, 200)
+        out = os.path.join(os.path.dirname(path), f"final_small{attempt}.mp4")
+        print(f"the film is {size:.0f} MB - squeezing it to fit {limit_mb} MB (picture {vkbps} kbit/s)")
+        run(["ffmpeg", "-y", "-i", path, "-c:v", "libx264", "-preset", "veryfast", "-b:v", f"{vkbps}k",
+             "-maxrate", f"{int(vkbps * 1.25)}k", "-bufsize", f"{vkbps * 2}k", "-pix_fmt", "yuv420p",
+             "-c:a", "copy", "-movflags", "+faststart", out])
+        size = os.path.getsize(out) / 1e6
+        cur = out
+        if size <= limit_mb:
+            break
+        factor *= 0.82
+    return cur
+
+
+
+# ---- v69: the finished film goes to a GitHub Release (up to 2 GB, free, no card) so the quality never has to be squeezed to 50 MB ----
+RELEASE_ENABLED = True       # needs a PUBLIC repo; False = always use Supabase Storage (squeezed under FINAL_MAX_MB)
+RELEASE_MAX_MB = 1900        # GitHub allows 2 GB per file; a film bigger than this is squeezed to fit
+RELEASE_KEEP = 3             # how many finished films stay on GitHub (older ones are deleted automatically)
+
+
+def upload_to_release(path, episode_id, tmp):
+    """Upload the finished film as a GitHub Release asset and return its public download link (None when it is not possible)."""
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
+    if not token or not repo:
+        print("no GITHUB_TOKEN / GITHUB_REPOSITORY here - using Supabase Storage for the finished film")
+        return None
+    H = {"Authorization": "Bearer " + token, "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+    path = shrink_to_limit(path, tmp, RELEASE_MAX_MB)
+    size_mb = os.path.getsize(path) / 1e6
+    tag = f"film-{episode_id}"
+    api = f"https://api.github.com/repos/{repo}"
+    # a release left from an earlier try of the same episode is removed first
+    old = requests.get(f"{api}/releases/tags/{tag}", headers=H, timeout=60)
+    if old.status_code == 200:
+        requests.delete(f"{api}/releases/{old.json()['id']}", headers=H, timeout=60)
+        requests.delete(f"{api}/git/refs/tags/{tag}", headers=H, timeout=60)
+    rel = requests.post(f"{api}/releases", headers=H, timeout=60, json={
+        "tag_name": tag, "name": f"Film {episode_id}", "body": "Finished film. Deleted automatically after newer films are made.",
+        "draft": False, "prerelease": True, "make_latest": "false"})
+    rel.raise_for_status()
+    rid = rel.json()["id"]
+    url = None
+    for attempt in range(3):
+        print(f"uploading the finished film to GitHub: {size_mb:.0f} MB (try {attempt + 1})")
+        try:
+            with open(path, "rb") as f:
+                up = requests.post(f"https://uploads.github.com/repos/{repo}/releases/{rid}/assets?name=film.mp4",
+                                   headers={**H, "Content-Type": "video/mp4"}, data=f, timeout=(30, 3600))
+            if up.status_code in (200, 201):
+                url = up.json().get("browser_download_url")
+                break
+            print(f"::warning::GitHub upload answered {up.status_code}: {up.text[:160]}")
+            if up.status_code == 422:      # the asset name already exists
+                break
+        except Exception as e:
+            print(f"::warning::GitHub upload failed ({e})")
+        time.sleep(5 * (attempt + 1))
+    if not url:
+        requests.delete(f"{api}/releases/{rid}", headers=H, timeout=60)
+        requests.delete(f"{api}/git/refs/tags/{tag}", headers=H, timeout=60)
+        return None
+    # keep only the newest few finished films on GitHub
+    try:
+        lst = requests.get(f"{api}/releases?per_page=100", headers=H, timeout=60).json()
+        films = sorted([r for r in lst if str(r.get("tag_name", "")).startswith("film-") and r.get("tag_name") != tag],
+                       key=lambda r: r.get("created_at", ""), reverse=True)
+        for r in films[max(RELEASE_KEEP - 1, 0):]:
+            requests.delete(f"{api}/releases/{r['id']}", headers=H, timeout=60)
+            requests.delete(f"{api}/git/refs/tags/{r['tag_name']}", headers=H, timeout=60)
+    except Exception as e:
+        print(f"::warning::old films were not cleaned up ({e})")
+    return url
+
 
 def pick_thumbnail_scene(scenes, image_by_scene, manifest):
     """The most dramatic picture that does not give the ending away: an explicit manifest choice wins,
@@ -2170,31 +2259,43 @@ def main():
 
             final_path = os.path.join(tmp, "final.mp4")
             master_audio_and_music(joined_path, final_path)
+            public_url = None
+            if RELEASE_ENABLED:
+                try:
+                    public_url = upload_to_release(final_path, episode_id, tmp)
+                except Exception as e:
+                    print(f"::warning::GitHub upload not used ({e}) - using Supabase Storage")
+                    public_url = None
+            if not public_url:
+                try:
+                    final_path = shrink_to_limit(final_path, tmp)
+                except Exception as e:
+                    print(f"::warning::could not squeeze the film ({e}) - uploading it as it is")
 
-            storage_path = f"videos/{episode_id}.mp4"
-            size_mb = os.path.getsize(final_path) / 1e6
-            print(f"uploading the finished video: {size_mb:.0f} MB")
-            with open(final_path, "rb") as f:
-                # streamed from disk (not loaded into memory) and given up to 30 minutes: a long film is a big file
-                r = requests.post(
-                    f"{SUPABASE_URL}/storage/v1/object/{BUCKET}/{storage_path}",
-                    headers={
-                        "apikey": SUPABASE_KEY,
-                        "Authorization": f"Bearer {SUPABASE_KEY}",
-                        "Content-Type": "video/mp4",
-                        "x-upsert": "true",
-                    },
-                    data=f,
-                    timeout=(30, 1800),
-                )
-            if r.status_code == 413 or "maximum allowed size" in r.text:
-                raise RuntimeError(
-                    f"Supabase refused the finished video ({size_mb:.0f} MB): it is bigger than the storage file-size limit "
-                    "(the Free plan allows 50 MB). Raise the limit in Supabase > Storage > Settings (needs the Pro plan), then send /resume."
-                )
-            r.raise_for_status()
+                storage_path = f"videos/{episode_id}.mp4"
+                size_mb = os.path.getsize(final_path) / 1e6
+                print(f"uploading the finished video: {size_mb:.0f} MB")
+                with open(final_path, "rb") as f:
+                    # streamed from disk (not loaded into memory) and given up to 30 minutes: a long film is a big file
+                    r = requests.post(
+                        f"{SUPABASE_URL}/storage/v1/object/{BUCKET}/{storage_path}",
+                        headers={
+                            "apikey": SUPABASE_KEY,
+                            "Authorization": f"Bearer {SUPABASE_KEY}",
+                            "Content-Type": "video/mp4",
+                            "x-upsert": "true",
+                        },
+                        data=f,
+                        timeout=(30, 1800),
+                    )
+                if r.status_code == 413 or "maximum allowed size" in r.text:
+                    raise RuntimeError(
+                        f"Supabase refused the finished video ({size_mb:.0f} MB): it is bigger than the storage file-size limit "
+                        "(the Free plan allows 50 MB). Raise the limit in Supabase > Storage > Settings (needs the Pro plan), then send /resume."
+                    )
+                r.raise_for_status()
 
-            public_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{storage_path}"
+                public_url = f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{storage_path}"
 
             # YouTube cover picture (never able to fail the film: if anything goes wrong n8n falls back to scene 1)
             if THUMB_ENABLED:
