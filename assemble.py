@@ -906,6 +906,9 @@ def parse_camera(text, idx):
     return moves, strength
 
 
+NO_TRANSITIONS_ALL = False
+
+
 def parse_transition(text, idx):
     """TRANSITION line -> (kind, direction). kind: dark_push, cover, dissolve, whip, spin, flash, push_through."""
     t = (text or "").lower()
@@ -920,6 +923,13 @@ def parse_transition(text, idx):
         d = "d"
     if d is None:
         d = "l" if idx % 2 == 0 else "r"
+    global NO_TRANSITIONS_ALL
+    if re.search(r"\b(?:no|none|without|skip|off)\b.*\b(?:all|every|whole|entire)\b|\b(?:all|every|whole|entire)\b.*\b(?:no|none|without|skip|off)\b", t) and re.search(r"\b(?:no|none|without|skip|off|cut)\b", t):
+        NO_TRANSITIONS_ALL = True                 # "TRANSITION: none for all" in any scene = a hard cut everywhere in this film
+    if NO_TRANSITIONS_ALL:
+        return "cut", d
+    if re.search(r"^\s*(?:none|no transitions?|no|off|nothing|hard cut|straight cut|plain cut|just cut|cut)\s*[.!]?\s*$|\b(?:no|without) transitions?\b|\bhard cut\b|\bstraight cut\b|\bplain cut\b|\bjust cut\b", t):
+        return "cut", d
     if not t.strip():
         return CINEMA_AUTO_TRANSITIONS[idx % len(CINEMA_AUTO_TRANSITIONS)], d
     if re.search(r"dark|black|void|shadow", t) and re.search(r"\bpush\w*|expand\w*|swallow\w*|engulf\w*", t):
@@ -1571,7 +1581,7 @@ def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text
                          plan, next_image=None, next_plan=None, is_first=False, is_last=False):
     """One scene with the 2.5D camera. The last frames melt into the first picture of the next scene (when there is one)."""
     st = cin_state(scene_index, image_path, tmp)
-    nst = cin_state(scene_index + 1, next_image, tmp) if next_image and next_plan else None
+    nst = cin_state(scene_index + 1, next_image, tmp) if next_image and next_plan and plan.get("kind") != "cut" else None
     N = max(int(round(duration * FPS)), 2)
     td = min(CINEMA_TRANSITION_SECONDS, duration * 0.4) if nst is not None else 0.0
     TN = int(round(td * FPS))
@@ -1608,7 +1618,7 @@ def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text
     vf_parts += watermark_filter()
     if is_first:
         vf_parts.append(f"fade=t=in:st=0:d={FADE_SECONDS}")
-    if is_last or nst is None:
+    if is_last or (nst is None and plan.get("kind") != "cut"):
         vf_parts.append(f"fade=t=out:st={fade_out_start:.3f}:d={FADE_SECONDS}")
     vf_parts.append("format=yuv420p")
     af = (f"afade=t=in:st=0:d=0.2,afade=t=out:st={max(duration - 0.25, 0):.3f}:d=0.25,apad")
@@ -1646,7 +1656,7 @@ def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text
         rc = proc.wait()
     if rc != 0:
         raise RuntimeError("cinema ffmpeg failed: " + open(log_path).read()[-400:])
-    print(f"scene {scene_index}: camera {'+'.join(plan['moves'])}" + (f", transition {plan['kind']} ({plan['dir']})" if nst is not None else ", ends with a fade"))
+    print(f"scene {scene_index}: camera {'+'.join(plan['moves'])}" + (f", transition {plan['kind']} ({plan['dir']})" if nst is not None else (", hard cut (no transition)" if plan.get("kind") == "cut" else ", ends with a fade")))
 
 
 def build_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, segment_path):
