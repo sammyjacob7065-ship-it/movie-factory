@@ -1308,7 +1308,36 @@ def _scene_field(scene, names):
     return ""
 
 
+def _all_strings(obj, depth=0):
+    """Every text value inside a scene (any field name, nested too), so a line is found wherever the parser stored it."""
+    out = []
+    if depth > 4:
+        return out
+    if isinstance(obj, str):
+        out.append(obj)
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            out.extend(_all_strings(v, depth + 1))
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            out.extend(_all_strings(v, depth + 1))
+    return out
+
+
+def _debug_scene(idx, scene):
+    try:
+        if isinstance(scene, dict):
+            keys = sorted(k for k, v in scene.items() if v not in (None, "", [], {}))
+            print(f"scene {idx} fields: {', '.join(keys)}")
+            for k in ("sound", "subscribe", "transition", "camera_instruction"):
+                if scene.get(k):
+                    print(f"scene {idx} {k} = {str(scene.get(k))[:260]!r}")
+    except Exception:
+        pass
+
+
 def cinema_plan(idx, scene, meta):
+    _debug_scene(idx, scene)
     cam = _scene_field(scene, ("camera", "camera_movement", "camera_motion", "camera_direction", "camera_text")) or (meta or {}).get("camera", "")
     if not cam:                                  # the n8n parser keeps the CAMERA line in camera_instruction / motion_prompt
         cam = _scene_field(scene, ("camera_instruction", "motion_prompt"))
@@ -1317,11 +1346,17 @@ def cinema_plan(idx, scene, meta):
     tr = _scene_field(scene, ("transition", "transition_out", "transition_text", "transition_note")) or (meta or {}).get("transition", "")
     if not tr and isinstance(scene, dict):       # the parser attaches the TRANSITION line to the end of the scene's SOUND text
         for _k in ("sound", "motion_prompt", "camera_instruction"):
-            _m = re.search(r"(?is)\bTRANSITION\b\s*[:\-\u2013\u2014]\s*(.+?)(?=\s+(?:SUBSCRIBE|SOUND|CAMERA|IMAGE|NARRATION|SECONDS|VOICE)\s*[:\-\u2013\u2014]|$)", str(scene.get(_k) or ""))
+            _m = re.search(r"(?is)\bTRANSITION\b\s*[:\-\u2013\u2014]\s*(.+?)(?=\s+(?:SUBSCRIBE|SOUND|CAMERA|IMAGE|NARRATION|SECONDS|VOICE|CONTINUITY)\s*[:\-\u2013\u2014]|$)", str(scene.get(_k) or ""))
             if _m:
                 tr = _m.group(1).strip()
                 break
-    _strip = lambda s: re.sub(r"(?is)\b(?:SUBSCRIBE|TRANSITION|SOUND)\b\s*[:\-\u2013\u2014].*$", "", s or "")
+    if not tr and isinstance(scene, dict):       # last chance: look in every text value of the scene
+        for _t in _all_strings(scene):
+            _m = re.search(r"(?is)\bTRANSITION\b\s*[:\-\u2013\u2014]\s*(.+?)(?=\s+(?:SUBSCRIBE|SOUND|CAMERA|IMAGE|NARRATION|SECONDS|VOICE|CONTINUITY)\s*[:\-\u2013\u2014]|$)", _t)
+            if _m:
+                tr = _m.group(1).strip()
+                break
+    _strip = lambda s: re.sub(r"(?is)\b(?:SUBSCRIBE|TRANSITION|SOUND|CONTINUITY)\b\s*[:\-\u2013\u2014].*$", "", s or "")
     cam, tr = _strip(cam), _strip(tr)
     moves, strength = parse_camera(cam, idx)
     kind, d = parse_transition(tr, idx)
@@ -1353,6 +1388,12 @@ def parse_subscribe(scene, extra_text=""):
                     if m:
                         spec = m.group(1).strip()
                         break
+    if spec is None and isinstance(scene, dict):
+        for _t in _all_strings(scene):
+            m = re.search(r"(?is)\bSUBSCRIBE\b\s*[:\-\u2013\u2014]\s*(.+?)(?=\s+(?:TRANSITION|SOUND|CAMERA|IMAGE|NARRATION|SECONDS|VOICE|LABEL|CONTINUITY)\s*[:\-\u2013\u2014]|$)", _t)
+            if m:
+                spec = m.group(1).strip()
+                break
     if not spec:
         return None
     if re.match(r"(?i)^(off|none|no|false)\b", spec):
