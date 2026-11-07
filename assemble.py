@@ -1301,9 +1301,260 @@ def _scene_field(scene, names):
 def cinema_plan(idx, scene, meta):
     cam = _scene_field(scene, ("camera", "camera_movement", "camera_motion", "camera_direction", "camera_text")) or (meta or {}).get("camera", "")
     tr = _scene_field(scene, ("transition", "transition_out", "transition_text", "transition_note")) or (meta or {}).get("transition", "")
+    _strip = lambda s: re.sub(r"(?is)\bSUBSCRIBE\b\s*[:\-\u2013\u2014].*$", "", s or "")
+    cam, tr = _strip(cam), _strip(tr)
     moves, strength = parse_camera(cam, idx)
     kind, d = parse_transition(tr, idx)
-    return {"moves": moves, "strength": strength, "kind": kind, "dir": d, "cam_text": cam, "tr_text": tr}
+    return {"moves": moves, "strength": strength, "kind": kind, "dir": d, "cam_text": cam, "tr_text": tr, "subscribe": parse_subscribe(scene)}
+
+
+# ---------------- SUBSCRIBE LABEL (v71): an animated subscribe button, placed by the script ----------------
+# In a scene write a line like   SUBSCRIBE: end   /   SUBSCRIBE: middle | Subscribe for more African stories   (start | middle | end)
+# No SUBSCRIBE line = nothing is added. Works on the scenes that use the cinema camera.
+CINEMA_SUBSCRIBE_SECONDS = 4.6   # how long the label stays on screen
+CINEMA_SUBSCRIBE_Y = 0.28        # centre of the label as a share of the picture height (the yellow captions sit lower, around 0.60)
+SUBSCRIBE_RED = (226, 28, 28)
+
+_SUB_POS = ("start", "middle", "end")
+
+
+def parse_subscribe(scene, extra_text=""):
+    """Find the script's SUBSCRIBE instruction for a scene. Returns {"pos": ..., "msg": ...} or None."""
+    spec = None
+    if isinstance(scene, dict):
+        v = scene.get("subscribe")
+        if isinstance(v, str) and v.strip():
+            spec = re.split(r"(?is)\s+(?:TRANSITION|SOUND|CAMERA|IMAGE|NARRATION|SECONDS|VOICE|LABEL)\s*[:\-\u2013\u2014]", v.strip())[0].strip()
+        if spec is None:
+            for key in ("sound", "transition", "camera_instruction", "motion_prompt", "camera", "label", "end_label"):
+                s = scene.get(key)
+                if isinstance(s, str):
+                    m = re.search(r"(?is)\bSUBSCRIBE\b\s*[:\-–—]\s*(.+?)(?=\s+(?:TRANSITION|SOUND|CAMERA|IMAGE|NARRATION|SECONDS|VOICE|LABEL)\s*[:\-–—]|$)", s)
+                    if m:
+                        spec = m.group(1).strip()
+                        break
+    if not spec:
+        return None
+    if re.match(r"(?i)^(off|none|no|false)\b", spec):
+        return None
+    pos, msg = "end", ""
+    parts = [p.strip() for p in spec.split("|", 1)]
+    head = parts[0].lower()
+    m = re.match(r"^(start|begin\w*|middle|mid|centre|center|end|ending|last)\b[\s,.\-:]*(.*)$", head)
+    if m:
+        w = m.group(1)
+        pos = "start" if w.startswith(("start", "begin")) else ("middle" if w in ("middle", "mid", "centre", "center") else "end")
+        rest = parts[0][len(m.group(0)) - len(m.group(2)):].strip() if m.group(2) else ""
+        msg = (parts[1] if len(parts) > 1 else rest).strip()
+    else:
+        msg = parts[0] if len(parts) == 1 else (parts[1] or parts[0])
+    msg = re.sub(r"[<>{}]", "", msg)[:90].strip(" \"'“”")
+    return {"pos": pos, "msg": msg}
+
+
+def _ease_out_back(x):
+    x = min(max(x, 0.0), 1.0)
+    c1, c3 = 1.70158, 2.70158
+    return 1 + c3 * (x - 1) ** 3 + c1 * (x - 1) ** 2
+
+
+class _SubLabel:
+    """Draws the animation: panel pops in, a cursor clicks SUBSCRIBE, it turns into SUBSCRIBED and the bell rings."""
+
+    def __init__(self, msg, T, W, H):
+        from PIL import Image, ImageDraw, ImageFont
+        self.Image, self.ImageDraw = Image, ImageDraw
+        u = self.u = min(W, H) / 1080.0
+        self.T, self.W, self.H = T, W, H
+        self.click_t = min(1.85, T * 0.5)
+        fpath = find_font()
+        SS = 2
+
+        def font(sz):
+            try:
+                return ImageFont.truetype(fpath, int(sz * SS)) if fpath else ImageFont.load_default()
+            except Exception:
+                return ImageFont.load_default()
+
+        def down(img):
+            return img.resize((max(1, img.width // SS), max(1, img.height // SS)), Image.LANCZOS)
+
+        # message (white, bold, soft shadow), wrapped to at most two lines
+        self.msg_img = None
+        mh = 0
+        if msg:
+            fnt = font(58 * u)
+            maxw = 860 * u * SS
+            words, lines, cur = msg.split(), [], ""
+            probe = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
+            for w_ in words:
+                t_ = (cur + " " + w_).strip()
+                if probe.textlength(t_, font=fnt) <= maxw or not cur:
+                    cur = t_
+                else:
+                    lines.append(cur)
+                    cur = w_
+            lines.append(cur)
+            lines = lines[:2]
+            lh = int(78 * u * SS)
+            img = Image.new("RGBA", (int(900 * u * SS), lh * len(lines) + int(30 * u * SS)), (0, 0, 0, 0))
+            d = ImageDraw.Draw(img)
+            for i, ln in enumerate(lines):
+                tw = d.textlength(ln, font=fnt)
+                x = (img.width - tw) / 2
+                y = int(8 * u * SS) + i * lh
+                d.text((x + 3 * u * SS, y + 4 * u * SS), ln, font=fnt, fill=(0, 0, 0, 170))
+                d.text((x, y), ln, font=fnt, fill=(255, 255, 255, 255))
+            self.msg_img = down(img)
+            mh = self.msg_img.height
+
+        bw, bh = int(520 * u), int(120 * u)
+        self.bw, self.bh = bw, bh
+
+        def button(color, text, play):
+            img = Image.new("RGBA", (bw * SS, bh * SS), (0, 0, 0, 0))
+            d = ImageDraw.Draw(img)
+            d.rounded_rectangle([0, 0, bw * SS - 1, bh * SS - 1], radius=int(30 * u * SS), fill=color + (255,))
+            f_ = font(52 * u)
+            tw = d.textlength(text, font=f_)
+            x0 = (bw * SS - tw) / 2 + (int(34 * u * SS) if play else 0)
+            if play:                                        # little white play badge on the left, like YouTube's own button
+                px, py, pw, ph = x0 - int(96 * u * SS), (bh * SS - int(44 * u * SS)) // 2, int(62 * u * SS), int(44 * u * SS)
+                d.rounded_rectangle([px, py, px + pw, py + ph], radius=int(12 * u * SS), fill=(255, 255, 255, 255))
+                d.polygon([(px + pw * 0.40, py + ph * 0.22), (px + pw * 0.40, py + ph * 0.78), (px + pw * 0.68, py + ph * 0.5)], fill=color + (255,))
+            d.text((x0, (bh * SS - 52 * u * SS) / 2 - 6 * u * SS), text, font=f_, fill=(255, 255, 255, 255))
+            return down(img)
+        self.red = button(SUBSCRIBE_RED, "SUBSCRIBE", True)
+        self.grey = button((74, 74, 78), "SUBSCRIBED", False)
+
+        # bell on a dark round badge
+        bs = int(120 * u)
+        self.bs = bs
+        circ = Image.new("RGBA", (bs * SS, bs * SS), (0, 0, 0, 0))
+        ImageDraw.Draw(circ).ellipse([0, 0, bs * SS - 1, bs * SS - 1], fill=(40, 40, 44, 235))
+        self.circle = down(circ)
+        g = Image.new("RGBA", (bs * SS, bs * SS), (0, 0, 0, 0))
+        d = ImageDraw.Draw(g)
+        cx, S = bs * SS / 2, bs * SS
+        d.ellipse([cx - S * 0.20, S * 0.24, cx + S * 0.20, S * 0.64], fill=(255, 255, 255, 255))                # dome
+        d.polygon([(cx - S * 0.20, S * 0.44), (cx + S * 0.20, S * 0.44), (cx + S * 0.27, S * 0.68), (cx - S * 0.27, S * 0.68)], fill=(255, 255, 255, 255))
+        d.rounded_rectangle([cx - S * 0.30, S * 0.64, cx + S * 0.30, S * 0.71], radius=int(S * 0.035), fill=(255, 255, 255, 255))
+        d.ellipse([cx - S * 0.07, S * 0.70, cx + S * 0.07, S * 0.82], fill=(255, 255, 255, 255))              # clapper
+        d.ellipse([cx - S * 0.04, S * 0.16, cx + S * 0.04, S * 0.25], fill=(255, 255, 255, 255))              # top knob
+        self.bell = down(g)
+
+        # cursor (white arrow with a dark outline)
+        cs = int(96 * u)
+        cur_ = Image.new("RGBA", (cs * SS, cs * SS), (0, 0, 0, 0))
+        d = ImageDraw.Draw(cur_)
+        pts = [(0.10, 0.04), (0.10, 0.80), (0.31, 0.62), (0.45, 0.93), (0.58, 0.87), (0.44, 0.57), (0.72, 0.57)]
+        P = [(x * cs * SS, y * cs * SS) for x, y in pts]
+        d.polygon(P, fill=(255, 255, 255, 255), outline=(20, 20, 20, 255))
+        d.line(P + [P[0]], fill=(20, 20, 20, 255), width=int(4 * u * SS))
+        self.cursor = down(cur_)
+
+        gap = int(40 * u) if mh else 0
+        self.CW = int(900 * u)
+        self.row_y = mh + gap + int(36 * u)
+        self.CH = self.row_y + bh + int(70 * u)
+        self.mh = mh
+        row_w = bw + int(20 * u) + bs
+        self.bx = (self.CW - row_w) // 2
+        self.bell_x = self.bx + bw + int(20 * u)
+
+    def draw(self, frame, t):
+        Image, u, T = self.Image, self.u, self.T
+        A = min(_ease(t / 0.35), _ease((T - t) / 0.35))
+        if A <= 0.01:
+            return frame
+        s = 0.72 + 0.28 * _ease_out_back(t / 0.5) if t < 0.5 else 1.0
+        cv = Image.new("RGBA", (self.CW, self.CH), (0, 0, 0, 0))
+        if self.msg_img is not None:
+            cv.alpha_composite(self.msg_img, ((self.CW - self.msg_img.width) // 2, 0))
+        tc = t - self.click_t
+        clicked = tc >= 0
+        btn = self.grey if clicked else self.red
+        if 0 <= tc < 0.12:
+            btn = Image.blend(self.red, self.grey, tc / 0.12)
+        bx, by, bw, bh = self.bx, self.row_y, self.bw, self.bh
+        if 0 <= tc < 0.14:                                    # the press: the button dips a little
+            k = 0.93
+            sm = btn.resize((int(bw * k), int(bh * k)), Image.LANCZOS)
+            cv.alpha_composite(sm, (bx + (bw - sm.width) // 2, by + (bh - sm.height) // 2))
+        else:
+            cv.alpha_composite(btn, (bx, by))
+        if 0 <= tc < 0.5:                                     # ripple ring
+            d = self.ImageDraw.Draw(cv)
+            r = (30 + 190 * (tc / 0.5)) * u
+            a = int(150 * (1 - tc / 0.5))
+            cxy = (bx + bw / 2, by + bh / 2)
+            ring = Image.new("RGBA", (self.CW, self.CH), (0, 0, 0, 0))
+            self.ImageDraw.Draw(ring).ellipse([cxy[0] - r, cxy[1] - r * 0.55, cxy[0] + r, cxy[1] + r * 0.55], outline=(255, 255, 255, a), width=max(2, int(5 * u)))
+            cv.alpha_composite(ring)
+        # bell: rings after the click
+        cv.alpha_composite(self.circle, (self.bell_x, by))
+        ang = 0.0
+        if 0 <= tc < 1.5:
+            ang = 26 * math.exp(-3.0 * tc) * math.sin(2 * math.pi * 5.5 * tc)
+        bell = self.bell.rotate(ang, resample=Image.BICUBIC, center=(self.bs / 2, self.bs * 0.18))
+        cv.alpha_composite(bell, (self.bell_x, by))
+        if clicked:                                           # red notification dot
+            ds = int(34 * u)
+            dot = Image.new("RGBA", (ds * 2, ds * 2), (0, 0, 0, 0))
+            self.ImageDraw.Draw(dot).ellipse([0, 0, ds * 2 - 1, ds * 2 - 1], fill=SUBSCRIBE_RED + (255,), outline=(255, 255, 255, 255), width=max(2, int(4 * u)))
+            dot = dot.resize((ds, ds), Image.LANCZOS)
+            cv.alpha_composite(dot, (self.bell_x + self.bs - int(ds * 0.8), by - int(ds * 0.2)))
+        # cursor travels to the button and clicks
+        t0c = self.click_t - 0.7
+        if t0c <= t < self.click_t + 0.9:
+            q = _ease((t - t0c) / 0.7)
+            sx, sy = bx + bw * 0.95, by + bh * 2.2
+            ex, ey = bx + bw * 0.62, by + bh * 0.42
+            cx_, cy_ = sx + (ex - sx) * q, sy + (ey - sy) * q
+            ca = min(1.0, (t - t0c) / 0.2, (self.click_t + 0.9 - t) / 0.3)
+            cur = self.cursor.copy()
+            cur.putalpha(cur.getchannel("A").point(lambda v: int(v * max(ca, 0))))
+            cv.alpha_composite(cur, (int(cx_ - 0.1 * self.cursor.width), int(cy_ - 0.04 * self.cursor.height)))
+        if s < 0.999:
+            nw, nh = int(self.CW * s), int(self.CH * s)
+            sm = cv.resize((nw, nh), Image.LANCZOS)
+            cv = Image.new("RGBA", (self.CW, self.CH), (0, 0, 0, 0))
+            cv.alpha_composite(sm, ((self.CW - nw) // 2, (self.CH - nh) // 2))
+        arr = np.asarray(cv).astype(np.float32)
+        al = (arr[..., 3:4] / 255.0) * A
+        x0 = int(self.W / 2 - self.CW / 2)
+        y0 = int(self.H * CINEMA_SUBSCRIBE_Y - self.CH / 2)
+        xa, ya = max(x0, 0), max(y0, 0)
+        xb, yb = min(x0 + self.CW, self.W), min(y0 + self.CH, self.H)
+        if xb <= xa or yb <= ya:
+            return frame
+        sub = arr[ya - y0: yb - y0, xa - x0: xb - x0]
+        a = al[ya - y0: yb - y0, xa - x0: xb - x0]
+        roi = frame[ya:yb, xa:xb].astype(np.float32)
+        frame[ya:yb, xa:xb] = np.clip(roi * (1 - a) + sub[..., 2::-1] * a, 0, 255).astype(np.uint8)
+        return frame
+
+
+def _subscribe_audio(audio_path, t_click, duration, tmp, tag):
+    """A small click and a bell 'ding' at the moment of the click."""
+    out = os.path.join(tmp, f"{tag}_sub.wav")
+    ms = int(max(t_click, 0) * 1000)
+    fc = (f"[1:a]afade=t=out:st=0.03:d=0.05,volume=0.35,adelay={ms}:all=1[c];"
+          f"[2:a]afade=t=out:st=0.05:d=1.0:curve=exp,volume=0.16,adelay={ms + 120}:all=1[b1];"
+          f"[3:a]afade=t=out:st=0.05:d=0.9:curve=exp,volume=0.08,adelay={ms + 120}:all=1[b2];"
+          "[0:a][c][b1][b2]amix=inputs=4:duration=first:dropout_transition=0:normalize=0[o]")
+    inputs = ["-i", audio_path, "-f", "lavfi", "-t", "0.1", "-i", "sine=f=1700:d=0.1:r=44100",
+              "-f", "lavfi", "-t", "1.2", "-i", "sine=f=1318:d=1.2:r=44100", "-f", "lavfi", "-t", "1.2", "-i", "sine=f=2637:d=1.2:r=44100"]
+    try:
+        run(["ffmpeg", "-y"] + inputs + ["-filter_complex", fc, "-map", "[o]", "-ar", "44100", "-ac", "2", out])
+        return out
+    except Exception:
+        try:
+            run(["ffmpeg", "-y"] + inputs + ["-filter_complex", fc.replace(":normalize=0", ""), "-map", "[o]", "-ar", "44100", "-ac", "2", out])
+            return out
+        except Exception as e:
+            print(f"::warning::subscribe sound skipped ({e})")
+            return audio_path
 
 
 def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, segment_path,
@@ -1322,6 +1573,24 @@ def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text
     audio_in = audio_path
     if nst is not None and CINEMA_WHOOSH:
         audio_in = _whoosh_audio(audio_path, duration, td, plan["kind"], tmp, f"s{scene_index:03d}")
+    lab, lab_t0 = None, 0.0
+    sub = plan.get("subscribe")
+    if sub:
+        try:
+            lab_T = min(CINEMA_SUBSCRIBE_SECONDS, duration * 0.85)
+            if sub["pos"] == "start":
+                lab_t0 = min(0.4, max(duration - lab_T, 0.0))
+            elif sub["pos"] == "middle":
+                lab_t0 = max((duration - lab_T) / 2.0, 0.0)
+            else:
+                lab_t0 = max(duration - td - 0.1 - lab_T, 0.0)
+            lab = _SubLabel(sub["msg"], lab_T, WIDTH, HEIGHT)
+            if CINEMA_WHOOSH:
+                audio_in = _subscribe_audio(audio_in, lab_t0 + lab.click_t, duration, tmp, f"s{scene_index:03d}")
+            print(f"scene {scene_index}: subscribe label ({sub['pos']}) from {lab_t0:.1f}s for {lab_T:.1f}s")
+        except Exception as e:
+            print(f"::warning::subscribe label skipped ({e})")
+            lab = None
 
     fade_out_start = max(duration - FADE_SECONDS, 0)
     vf_parts = []
@@ -1349,6 +1618,8 @@ def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text
                     p = (k - (N - TN) + 1) / float(TN)
                     frame = tfun(frame, B0, p, plan["dir"])
                 frame = cin_finish(frame, tools, k)
+                if lab is not None and lab_t0 <= k / float(FPS) < lab_t0 + lab.T:
+                    frame = lab.draw(np.ascontiguousarray(frame), k / float(FPS) - lab_t0)
                 proc.stdin.write(np.ascontiguousarray(frame).tobytes())
             proc.stdin.close()
         except Exception as e:
