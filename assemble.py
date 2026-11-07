@@ -1300,8 +1300,18 @@ def _scene_field(scene, names):
 
 def cinema_plan(idx, scene, meta):
     cam = _scene_field(scene, ("camera", "camera_movement", "camera_motion", "camera_direction", "camera_text")) or (meta or {}).get("camera", "")
+    if not cam:                                  # the n8n parser keeps the CAMERA line in camera_instruction / motion_prompt
+        cam = _scene_field(scene, ("camera_instruction", "motion_prompt"))
+        if cam.strip().lower().startswith("gentle natural movement"):     # that is the parser's own filler, not a script instruction
+            cam = ""
     tr = _scene_field(scene, ("transition", "transition_out", "transition_text", "transition_note")) or (meta or {}).get("transition", "")
-    _strip = lambda s: re.sub(r"(?is)\bSUBSCRIBE\b\s*[:\-\u2013\u2014].*$", "", s or "")
+    if not tr and isinstance(scene, dict):       # the parser attaches the TRANSITION line to the end of the scene's SOUND text
+        for _k in ("sound", "motion_prompt", "camera_instruction"):
+            _m = re.search(r"(?is)\bTRANSITION\b\s*[:\-\u2013\u2014]\s*(.+?)(?=\s+(?:SUBSCRIBE|SOUND|CAMERA|IMAGE|NARRATION|SECONDS|VOICE)\s*[:\-\u2013\u2014]|$)", str(scene.get(_k) or ""))
+            if _m:
+                tr = _m.group(1).strip()
+                break
+    _strip = lambda s: re.sub(r"(?is)\b(?:SUBSCRIBE|TRANSITION|SOUND)\b\s*[:\-\u2013\u2014].*$", "", s or "")
     cam, tr = _strip(cam), _strip(tr)
     moves, strength = parse_camera(cam, idx)
     kind, d = parse_transition(tr, idx)
