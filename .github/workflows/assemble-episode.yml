@@ -63,7 +63,7 @@ jobs:
 
       # v68: numpy + opencv + onnxruntime switch on the cinema camera (2.5D depth parallax + transitions)
       - name: Install Python dependencies
-        run: pip install requests numpy opencv-python-headless onnxruntime
+        run: pip install requests numpy opencv-python-headless onnxruntime pillow
 
       - name: Assemble the episode
         env:
