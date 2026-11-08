@@ -824,7 +824,7 @@ def watermark_filter():
 # Needs: pip install numpy opencv-python-headless onnxruntime   (without them the film is built the old way, nothing breaks)
 CINEMA = True                  # False = the older slow zoom on every scene (a manifest with "cinema": false does the same)
 CINEMA_TRANSITION_SECONDS = 0.55   # length of the transition at the end of a scene
-CINEMA_PARALLAX = 0.065        # sideways travel of the nearest parts, as a share of the picture width (bigger = more 3D but more stretching)
+CINEMA_PARALLAX = 0.050        # sideways travel of the nearest parts, as a share of the picture width (bigger = more 3D but more stretching)
 CINEMA_SOFT_EDGE = 70.0        # bigger number = sharper depth edges (more 3D, more tearing); smaller = softer, safer
 CINEMA_BASE_ZOOM = 1.18        # the picture is enlarged this much so the camera can move without showing edges
 CINEMA_DOF = True              # far parts (and a very near foreground) go soft, like a real lens
@@ -832,6 +832,7 @@ CINEMA_GRAIN = 0.015           # film grain strength (0 = off)
 CINEMA_VIGNETTE = 0.22         # dark corners (0 = off)
 CINEMA_GRADE = 1.0             # v75: cinematic colour grade - teal shadows, warm highlights, filmic contrast (0 = off, 1 = full, 0.5 = half)
 CINEMA_SATURATION = 1.06       # colour richness after the grade (1.0 = unchanged)
+CINEMA_TRANSITION_RELAX = 0.85  # v77: before a transition the 3D camera shift is eased back to flat by this much (0 = off, 1 = fully flat). This stops heads growing and arms thinning while the scene changes
 CINEMA_WHOOSH = True           # a quiet whoosh / boom is added at each transition
 CINEMA_DEPTH_URLS = ["https://github.com/isl-org/MiDaS/releases/download/v2_1/model-small.onnx"]   # free depth model (runs on the CPU)
 CINEMA_AUTO_CAMERAS = [["push"], ["truck_r", "push"], ["orbit_l"], ["crane_up", "push"], ["pull"], ["orbit_r", "push"], ["truck_l"], ["crane_down", "pull"]]
@@ -845,7 +846,7 @@ except Exception:
 _CIN = {"sess": None, "tried": False, "states": {}}
 
 _CAM_DELTA = {
-    "push": {"zoom": 0.05, "dz": 0.22}, "pull": {"zoom": -0.05, "dz": -0.22},
+    "push": {"zoom": 0.05, "dz": 0.16}, "pull": {"zoom": -0.05, "dz": -0.16},
     "truck_l": {"tx": -1.0}, "truck_r": {"tx": 1.0},
     "orbit_l": {"tx": -1.25, "roll": 1.6, "zoom": 0.025}, "orbit_r": {"tx": 1.25, "roll": -1.6, "zoom": 0.025},
     "crane_up": {"ty": -1.0, "zoom": 0.02}, "crane_down": {"ty": 1.0, "zoom": 0.02},
@@ -1171,7 +1172,7 @@ def tr_whip(A, B, p, d):
 
 def tr_push_through(A, B, p, d):
     e = _ease(p)
-    a = _zoom_blur(_zoom_img(A, 1.0 + 2.6 * e * e), 0.30 * math.sin(math.pi * min(p * 1.15, 1.0)))
+    a = _zoom_blur(_zoom_img(A, 1.0 + 1.4 * e * e), 0.30 * math.sin(math.pi * min(p * 1.15, 1.0)))
     bs = 0.62 + 0.38 * e
     b = _zoom_blur(_zoom_img(B, bs), 0.22 * (1 - p))
     return _mix(a, b, _ease((p - 0.30) / 0.45))
@@ -1198,8 +1199,8 @@ def tr_flash(A, B, p, d):
 def tr_spin(A, B, p, d):
     sgn = 1.0 if d in ("l", "u") else -1.0
     uA, uB = _ease(p / 0.5), _ease((p - 0.5) / 0.5)
-    a = _rot_blur(A, sgn * 70 * uA, 1.0 + 0.9 * uA, 26 * math.sin(math.pi * min(uA, 1)) * sgn)
-    b = _rot_blur(B, -sgn * 70 * (1 - uB), 1.0 + 0.9 * (1 - uB), 26 * math.sin(math.pi * min(1 - uB, 1)) * -sgn)
+    a = _rot_blur(A, sgn * 45 * uA, 1.0 + 0.5 * uA, 26 * math.sin(math.pi * min(uA, 1)) * sgn)
+    b = _rot_blur(B, -sgn * 45 * (1 - uB), 1.0 + 0.5 * (1 - uB), 26 * math.sin(math.pi * min(1 - uB, 1)) * -sgn)
     return _mix(a, b, _ease((p - 0.42) / 0.16))
 
 
@@ -1780,9 +1781,15 @@ def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text
         try:
             for k in range(N):
                 t = k / float(N - 1)
-                frame = cin_render(st, cin_pose_at(plan["moves"], plan["strength"], t))
+                pose = cin_pose_at(plan["moves"], plan["strength"], t)
                 if TN and k >= N - TN:
                     p = (k - (N - TN) + 1) / float(TN)
+                    rl = _ease(p) * CINEMA_TRANSITION_RELAX
+                    pose = dict(pose)
+                    for _key in ("tx", "ty", "dz"):
+                        pose[_key] *= (1.0 - rl)
+                frame = cin_render(st, pose)
+                if TN and k >= N - TN:
                     frame = tfun(frame, B0, p, plan["dir"])
                 frame = cin_finish(frame, tools, k)
                 if lab is not None and lab_t0 <= k / float(FPS) < lab_t0 + lab.T:
