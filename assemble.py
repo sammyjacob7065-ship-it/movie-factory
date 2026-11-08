@@ -827,11 +827,12 @@ CINEMA_TRANSITION_SECONDS = 0.55   # length of the transition at the end of a sc
 CINEMA_PARALLAX = 0.050        # sideways travel of the nearest parts, as a share of the picture width (bigger = more 3D but more stretching)
 CINEMA_SOFT_EDGE = 70.0        # bigger number = sharper depth edges (more 3D, more tearing); smaller = softer, safer
 CINEMA_BASE_ZOOM = 1.18        # the picture is enlarged this much so the camera can move without showing edges
-CINEMA_DOF = True              # far parts (and a very near foreground) go soft, like a real lens
+CINEMA_DOF = False             # far parts (and a very near foreground) go soft, like a real lens
 CINEMA_GRAIN = 0.015           # film grain strength (0 = off)
 CINEMA_VIGNETTE = 0.22         # dark corners (0 = off)
 CINEMA_GRADE = 1.0             # v75: cinematic colour grade - teal shadows, warm highlights, filmic contrast (0 = off, 1 = full, 0.5 = half)
 CINEMA_SATURATION = 1.06       # colour richness after the grade (1.0 = unchanged)
+CINEMA_SHARPEN = 0.6            # v78: sharpening of every frame (0 = off, 0.6 = clear faces, 1.0 = very crisp)
 CINEMA_TRANSITION_RELAX = 0.85  # v77: before a transition the 3D camera shift is eased back to flat by this much (0 = off, 1 = fully flat). This stops heads growing and arms thinning while the scene changes
 CINEMA_WHOOSH = True           # a quiet whoosh / boom is added at each transition
 CINEMA_DEPTH_URLS = ["https://github.com/isl-org/MiDaS/releases/download/v2_1/model-small.onnx"]   # free depth model (runs on the CPU)
@@ -1105,7 +1106,7 @@ def cin_render(st, pose):
     par = Dd - 0.2
     mx = (xr * inv + st.cx + (pose["tx"] * CINEMA_PARALLAX * st.W) * par).astype(np.float32)
     my = (yr * inv + st.cy + (pose["ty"] * CINEMA_PARALLAX * st.H * 0.55) * par).astype(np.float32)
-    return cv2.remap(st.src, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+    return cv2.remap(st.src, mx, my, cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT_101)
 
 
 # ---- transitions: blend the last frames of scene A into the first picture of scene B ----
@@ -1257,6 +1258,9 @@ def cin_finish_tools(W, H):
 
 
 def cin_finish(frame, tools, k):
+    if CINEMA_SHARPEN > 0:
+        blur = cv2.GaussianBlur(frame, (0, 0), 1.2 * max(frame.shape[1], frame.shape[0]) / 1920.0 + 0.4)
+        frame = cv2.addWeighted(frame, 1.0 + CINEMA_SHARPEN, blur, -CINEMA_SHARPEN, 0)
     if CINEMA_VIGNETTE > 0:
         frame = cv2.multiply(frame, tools["vig"], scale=1 / 255.0)
     frame = cv2.LUT(frame, tools["lut"])
