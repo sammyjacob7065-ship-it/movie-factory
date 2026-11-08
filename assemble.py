@@ -830,6 +830,8 @@ CINEMA_BASE_ZOOM = 1.18        # the picture is enlarged this much so the camera
 CINEMA_DOF = True              # far parts (and a very near foreground) go soft, like a real lens
 CINEMA_GRAIN = 0.015           # film grain strength (0 = off)
 CINEMA_VIGNETTE = 0.22         # dark corners (0 = off)
+CINEMA_GRADE = 1.0             # v75: cinematic colour grade - teal shadows, warm highlights, filmic contrast (0 = off, 1 = full, 0.5 = half)
+CINEMA_SATURATION = 1.06       # colour richness after the grade (1.0 = unchanged)
 CINEMA_WHOOSH = True           # a quiet whoosh / boom is added at each transition
 CINEMA_DEPTH_URLS = ["https://github.com/isl-org/MiDaS/releases/download/v2_1/model-small.onnx"]   # free depth model (runs on the CPU)
 CINEMA_AUTO_CAMERAS = [["push"], ["truck_r", "push"], ["orbit_l"], ["crane_up", "push"], ["pull"], ["orbit_r", "push"], ["truck_l"], ["crane_down", "pull"]]
@@ -1235,8 +1237,21 @@ def cin_finish_tools(W, H):
     rng = np.random.RandomState(7)
     tools["grain"] = [(rng.randn(H, W, 1) * CINEMA_GRAIN * 255).astype(np.int16) for _ in range(6)]
     xs = np.arange(256, dtype=np.float32) / 255.0
-    lut = np.clip(0.5 + (xs - 0.5) * 1.06 + 0.012, 0, 1)         # a touch more contrast
-    tools["lut"] = (lut * 255).astype(np.uint8)
+    g = max(0.0, min(float(CINEMA_GRADE), 1.0))
+    base = np.clip(0.5 + (xs - 0.5) * 1.06 + 0.012, 0, 1)         # a touch more contrast
+    if g > 0:
+        # filmic S-curve: deeper shadows, bright but rolled-off highlights, blacks slightly lifted like film stock
+        sc = xs * xs * (3 - 2 * xs)
+        curve = 0.55 * base + 0.45 * ((1 - 0.5 * g) * base + 0.5 * g * sc)
+        curve = np.clip(0.014 * g + curve * (1 - 0.014 * g) - 0.02 * g * np.clip((xs - 0.85) / 0.15, 0, 1) ** 2, 0, 1)
+        sh, hi = (1 - xs) ** 2, xs ** 2                            # shadow weight, highlight weight
+        r = curve - 0.036 * g * sh + 0.040 * g * hi                # orange in the lights, less red in the dark
+        gr = curve + 0.006 * g * sh - 0.006 * g * hi
+        b = curve + 0.046 * g * sh - 0.042 * g * hi                # teal in the dark, less blue in the lights
+        lut = np.stack([b, gr, r], axis=1)                         # OpenCV frames are B, G, R
+        tools["lut"] = (np.clip(lut, 0, 1) * 255).astype(np.uint8).reshape(256, 1, 3)
+    else:
+        tools["lut"] = (base * 255).astype(np.uint8)
     return tools
 
 
@@ -1244,6 +1259,10 @@ def cin_finish(frame, tools, k):
     if CINEMA_VIGNETTE > 0:
         frame = cv2.multiply(frame, tools["vig"], scale=1 / 255.0)
     frame = cv2.LUT(frame, tools["lut"])
+    if CINEMA_GRADE > 0 and abs(CINEMA_SATURATION - 1.0) > 0.01:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.merge([gray, gray, gray])
+        frame = cv2.addWeighted(frame, CINEMA_SATURATION, gray, 1.0 - CINEMA_SATURATION, 0)
     if CINEMA_GRAIN > 0:
         frame = np.clip(frame.astype(np.int16) + tools["grain"][k % 6], 0, 255).astype(np.uint8)
     return frame
@@ -1356,11 +1375,11 @@ def cinema_plan(idx, scene, meta):
             if _m:
                 tr = _m.group(1).strip()
                 break
-    _strip = lambda s: re.sub(r"(?is)\b(?:SUBSCRIBE|TRANSITION|SOUND|CONTINUITY)\b\s*[:\-\u2013\u2014].*$", "", s or "")
+    _strip = lambda s: re.sub(r"(?is)\b(?:SUBSCRIBE|TRANSITION|SOUND|CONTINUITY|END)\b\s*[:\-\u2013\u2014].*$", "", s or "")
     cam, tr = _strip(cam), _strip(tr)
     moves, strength = parse_camera(cam, idx)
     kind, d = parse_transition(tr, idx)
-    return {"moves": moves, "strength": strength, "kind": kind, "dir": d, "cam_text": cam, "tr_text": tr, "subscribe": parse_subscribe(scene)}
+    return {"moves": moves, "strength": strength, "kind": kind, "dir": d, "cam_text": cam, "tr_text": tr, "subscribe": parse_subscribe(scene), "end": parse_end(scene)}
 
 
 # ---------------- SUBSCRIBE LABEL (v71): an animated subscribe button, placed by the script ----------------
@@ -1596,6 +1615,82 @@ class _SubLabel:
         return frame
 
 
+CINEMA_END_SECONDS = 4.0          # how long the END title stays on screen (at the very end of the last scene)
+
+
+def parse_end(scene):
+    """The script's END line, e.g. 'END: TO BE CONTINUED'. Returns the text, or None."""
+    txt = None
+    if isinstance(scene, dict):
+        v = scene.get("end")
+        if isinstance(v, str) and v.strip():
+            txt = v.strip()
+        if txt is None:
+            for _t in _all_strings(scene):
+                m = re.search(r"(?:^|\s)END\s*[:\-\u2013\u2014]\s*(.+?)(?=\s+(?:SUBSCRIBE|TRANSITION|SOUND|CAMERA|IMAGE|NARRATION|SECONDS|VOICE|CONTINUITY)\s*[:\-\u2013\u2014]|$)", _t)
+                if m:
+                    txt = m.group(1).strip()
+                    break
+    if not txt:
+        return None
+    txt = re.split(r"(?is)\s+(?:SUBSCRIBE|TRANSITION|SOUND|CAMERA|IMAGE|NARRATION|SECONDS|VOICE)\s*[:\-\u2013\u2014]", txt)[0]
+    txt = re.sub(r"[<>{}]", "", txt).strip(" \"'\u201c\u201d")[:60]
+    if not txt or re.match(r"(?i)^(off|none|no|false)$", txt):
+        return None
+    return txt
+
+
+class _EndTitle:
+    """A big centred title (like a film's last card): the picture darkens a little, the words fade in, spread out and hold."""
+
+    def __init__(self, text, T, W, H):
+        from PIL import Image, ImageDraw, ImageFont
+        self.T, self.W, self.H = T, W, H
+        u = min(W, H) / 1080.0
+        fpath = find_font()
+        txt = text.upper()
+        size = int(110 * u)
+        while True:
+            try:
+                f = ImageFont.truetype(fpath, size) if fpath else ImageFont.load_default()
+            except Exception:
+                f = ImageFont.load_default()
+            lines = [txt]
+            if len(txt.split()) > 1 and f.getlength(txt) > W * 0.86:
+                w = txt.split()
+                k = len(w) // 2
+                lines = [" ".join(w[:k]), " ".join(w[k:])]
+            wide = max(f.getlength(l) for l in lines)
+            if wide <= W * 0.86 or size <= 24:
+                break
+            size = int(size * 0.9)
+        lh = int(size * 1.25)
+        hh = lh * len(lines) + int(30 * u)
+        layer = Image.new("RGBA", (W, hh), (0, 0, 0, 0))
+        d = ImageDraw.Draw(layer)
+        for i, l in enumerate(lines):
+            tw = f.getlength(l)
+            x, y = (W - tw) / 2, int(15 * u) + i * lh
+            d.text((x + 3 * u, y + 4 * u), l, font=f, fill=(0, 0, 0, 200))
+            d.text((x, y), l, font=f, fill=(255, 255, 255, 255))
+        self.layer = np.asarray(layer).astype(np.float32)
+        self.y0 = int(H * 0.5 - hh / 2)
+        self.hh = hh
+
+    def draw(self, frame, t):
+        a_in = min(max(t / 1.0, 0.0), 1.0)
+        a_in = a_in * a_in * (3 - 2 * a_in)
+        frame = (frame.astype(np.float32) * (1.0 - 0.45 * a_in)).clip(0, 255)
+        y0, hh = self.y0, self.hh
+        ya, yb = max(y0, 0), min(y0 + hh, self.H)
+        if yb > ya:
+            lay = self.layer[ya - y0: yb - y0]
+            al = lay[..., 3:4] / 255.0 * a_in
+            roi = frame[ya:yb]
+            frame[ya:yb] = roi * (1 - al) + lay[..., 2::-1] * al
+        return frame.astype(np.uint8)
+
+
 def _subscribe_audio(audio_path, t_click, duration, tmp, tag):
     """A small click and a bell 'ding' at the moment of the click."""
     out = os.path.join(tmp, f"{tag}_sub.wav")
@@ -1653,6 +1748,17 @@ def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text
             print(f"::warning::subscribe label skipped ({e})")
             lab = None
 
+    endt, endt_t0 = None, 0.0
+    if plan.get("end"):
+        try:
+            end_T = min(CINEMA_END_SECONDS, duration * 0.9)
+            endt_t0 = max(duration - end_T, 0.0)
+            endt = _EndTitle(plan["end"], end_T, WIDTH, HEIGHT)
+            print(f'scene {scene_index}: end title "{plan["end"]}" from {endt_t0:.1f}s for {end_T:.1f}s')
+        except Exception as e:
+            print(f"::warning::end title skipped ({e})")
+            endt = None
+
     fade_out_start = max(duration - FADE_SECONDS, 0)
     vf_parts = []
     vf_parts += subtitle_filters(sub_text, duration, tmp, f"s{scene_index:03d}")
@@ -1681,6 +1787,8 @@ def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text
                 frame = cin_finish(frame, tools, k)
                 if lab is not None and lab_t0 <= k / float(FPS) < lab_t0 + lab.T:
                     frame = lab.draw(np.ascontiguousarray(frame), k / float(FPS) - lab_t0)
+                if endt is not None and k / float(FPS) >= endt_t0:
+                    frame = endt.draw(np.ascontiguousarray(frame), k / float(FPS) - endt_t0)
                 proc.stdin.write(np.ascontiguousarray(frame).tobytes())
             proc.stdin.close()
         except Exception as e:
