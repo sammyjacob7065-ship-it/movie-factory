@@ -71,7 +71,10 @@ _CAP_KERN = {"AA":15,"AC":-49,"AG":-48,"AO":-49,"AQ":-49,"AS":-28,"AT":-97,"AU":
 WATERMARK_TEXT = "SAMSON_SET"   # "" = no watermark
 WATERMARK_OPACITY = 0.40            # 0.0 invisible ... 1.0 solid; 0.35-0.5 looks professional
 WATERMARK_SIZE = 0.035              # letter height as a share of the short side of the frame (0.028 = small)
-WATERMARK_POSITION = "top-right"    # top-right, top-left, bottom-right or bottom-left
+WATERMARK_POSITION = "top-right"    # top-right, top-left, bottom-right, bottom-left or center
+WATERMARK_CENTER_FOR_WIDE = True    # v80: horizontal (16:9) films get the mark in the MIDDLE, harder to crop out; vertical films keep the position above
+WATERMARK_CENTER_SIZE = 0.075       # letter height of the middle mark (share of the short side)
+WATERMARK_CENTER_OPACITY = 0.20     # see-through, so it does not hide the picture but cannot be cropped out
 SFX_ENABLED = True          # the film's sound effects (planned from the script by the "sound supervisor" in n8n) are mixed in
 SFX_ONCE_REL_DB = -7.0      # loudness of a single event (explosion, door slam) compared with the narration
 SFX_REPEAT_REL_DB = -10.0   # repeated hits (fight blows, sword clashes, knocks)
@@ -794,12 +797,18 @@ def watermark_filter():
     short = min(WIDTH, HEIGHT)
     size = max(18, int(short * WATERMARK_SIZE))
     m = max(16, int(short * 0.035))
+    opacity = WATERMARK_OPACITY
+    place = "center" if (WATERMARK_CENTER_FOR_WIDE and WIDTH > HEIGHT) else WATERMARK_POSITION
+    if place == "center":
+        size = max(24, int(short * WATERMARK_CENTER_SIZE))
+        opacity = WATERMARK_CENTER_OPACITY
     pos = {
+        "center": ("(w-text_w)/2", "(h-text_h)/2"),
         "top-right": (f"w-text_w-{m}", f"{m}"),
         "top-left": (f"{m}", f"{m}"),
         "bottom-right": (f"w-text_w-{m}", f"h-text_h-{m}"),
         "bottom-left": (f"{m}", f"h-text_h-{m}"),
-    }.get(WATERMARK_POSITION, (f"w-text_w-{m}", f"{m}"))
+    }.get(place, (f"w-text_w-{m}", f"{m}"))
     safe = WATERMARK_TEXT.replace("\\", "").replace("'", "").replace(":", "").replace("%", "")
     parts = []
     font = find_font()
@@ -809,8 +818,8 @@ def watermark_filter():
         f"text='{safe}'",
         "expansion=none",
         f"fontsize={size}",
-        f"fontcolor=white@{WATERMARK_OPACITY}",
-        f"shadowcolor=black@{WATERMARK_OPACITY * 0.6:.2f}",
+        f"fontcolor=white@{opacity}",
+        f"shadowcolor=black@{opacity * 0.6:.2f}",
         "shadowx=2", "shadowy=2",
         f"x={pos[0]}", f"y={pos[1]}",
     ]
