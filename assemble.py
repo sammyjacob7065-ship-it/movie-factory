@@ -826,12 +826,13 @@ CINEMA = True                  # False = the older slow zoom on every scene (a m
 CINEMA_TRANSITION_SECONDS = 0.55   # length of the transition at the end of a scene
 CINEMA_PARALLAX = 0.050        # sideways travel of the nearest parts, as a share of the picture width (bigger = more 3D but more stretching)
 CINEMA_SOFT_EDGE = 70.0        # bigger number = sharper depth edges (more 3D, more tearing); smaller = softer, safer
-CINEMA_BASE_ZOOM = 1.18        # the picture is enlarged this much so the camera can move without showing edges
+CINEMA_BASE_ZOOM = 1.12        # the picture is enlarged this much so the camera can move without showing edges
 CINEMA_DOF = False             # far parts (and a very near foreground) go soft, like a real lens
 CINEMA_GRAIN = 0.015           # film grain strength (0 = off)
 CINEMA_VIGNETTE = 0.22         # dark corners (0 = off)
 CINEMA_GRADE = 1.0             # v75: cinematic colour grade - teal shadows, warm highlights, filmic contrast (0 = off, 1 = full, 0.5 = half)
 CINEMA_SATURATION = 1.06       # colour richness after the grade (1.0 = unchanged)
+CINEMA_HEAD_BIAS = 0.5           # v79: the camera window sits higher on the picture so heads are not cut off at the top (0 = centred, 1 = top edge)
 CINEMA_SHARPEN = 0.6            # v78: sharpening of every frame (0 = off, 0.6 = clear faces, 1.0 = very crisp)
 CINEMA_TRANSITION_RELAX = 0.85  # v77: before a transition the 3D camera shift is eased back to flat by this much (0 = off, 1 = fully flat). This stops heads growing and arms thinning while the scene changes
 CINEMA_WHOOSH = True           # a quiet whoosh / boom is added at each transition
@@ -1105,7 +1106,9 @@ def cin_render(st, pose):
     inv = 1.0 / (CINEMA_BASE_ZOOM + pose["zoom"] + pose["dz"] * Dd)
     par = Dd - 0.2
     mx = (xr * inv + st.cx + (pose["tx"] * CINEMA_PARALLAX * st.W) * par).astype(np.float32)
-    my = (yr * inv + st.cy + (pose["ty"] * CINEMA_PARALLAX * st.H * 0.55) * par).astype(np.float32)
+    _z = CINEMA_BASE_ZOOM + pose["zoom"] + pose["dz"] * 0.5
+    _up = (1.0 - 1.0 / _z) / 2.0 * st.H * CINEMA_HEAD_BIAS     # v79: move the window up, so the top of heads stays in the picture
+    my = (yr * inv + st.cy - _up + (pose["ty"] * CINEMA_PARALLAX * st.H * 0.55) * par).astype(np.float32)
     return cv2.remap(st.src, mx, my, cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT_101)
 
 
