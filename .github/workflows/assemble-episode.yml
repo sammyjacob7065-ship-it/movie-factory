@@ -74,3 +74,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # v69: used to upload the finished film to a GitHub Release
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}   # optional: exact word times for the yellow caption box (leave the secret out and it still works)
         run: python assemble.py
+
+      # v77: tell n8n the build is over (finished OR failed). n8n does not wait any more, so it never times out on long films.
+      - name: Tell n8n the build is finished
+        if: always()
+        env:
+          MANIFEST_JSON: ${{ inputs.manifest }}
+          N8N_ASSEMBLE_WEBHOOK: ${{ secrets.N8N_ASSEMBLE_WEBHOOK }}
+          BUILD_RESULT: ${{ job.status }}
+        run: |
+          URL="${N8N_ASSEMBLE_WEBHOOK:-https://samson7065.app.n8n.cloud/webhook/assemble-finished}"
+          EID=$(python3 -c "import json,os;print(json.loads(os.environ['MANIFEST_JSON'])['episodeId'])")
+          curl -sS -m 30 --retry 3 --retry-delay 5 -X POST -H 'Content-Type: application/json' \
+            -d "{\"episodeId\":\"$EID\",\"result\":\"$BUILD_RESULT\"}" "$URL" || echo "could not reach n8n"
