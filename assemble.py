@@ -844,6 +844,9 @@ CINEMA_SATURATION = 1.06       # colour richness after the grade (1.0 = unchange
 CINEMA_HEAD_BIAS = 0.5           # v79: the camera window sits higher on the picture so heads are not cut off at the top (0 = centred, 1 = top edge)
 CINEMA_SHARPEN = 0.6            # v78: sharpening of every frame (0 = off, 0.6 = clear faces, 1.0 = very crisp)
 CINEMA_TRANSITION_RELAX = 0.85  # v77: before a transition the 3D camera shift is eased back to flat by this much (0 = off, 1 = fully flat). This stops heads growing and arms thinning while the scene changes
+CINEMA_WHIP_BLUR = 0.05          # v81: blur of the slide/whip transition as a share of the picture size (was 0.18, which smeared faces: the 'melting'). 0 = no blur
+CINEMA_LEADIN_SECONDS = 0.7     # v81: the camera starts calming this long BEFORE the transition, so the picture is already steady when the slide begins
+CINEMA_LEADIN_RELAX = 0.45      # v81: how much of the 3D shift is removed during that lead-in (0 = none)
 CINEMA_WHOOSH = True           # a quiet whoosh / boom is added at each transition
 CINEMA_DEPTH_URLS = ["https://github.com/isl-org/MiDaS/releases/download/v2_1/model-small.onnx"]   # free depth model (runs on the CPU)
 CINEMA_AUTO_CAMERAS = [["push"], ["truck_r", "push"], ["orbit_l"], ["crane_up", "push"], ["pull"], ["orbit_r", "push"], ["truck_l"], ["crane_down", "pull"]]
@@ -1174,12 +1177,12 @@ def tr_whip(A, B, p, d):
         strip = np.hstack([A, B]) if d == "l" else np.hstack([B, A])
         off = int(round(e * w)) if d == "l" else int(round((1 - e) * w))
         out = strip[:, off: off + w]
-        k = int(2 + 0.18 * w * math.sin(math.pi * min(max(p, 0), 1)) ** 1.2) | 1
+        k = int(2 + CINEMA_WHIP_BLUR * w * math.sin(math.pi * min(max(p, 0), 1)) ** 1.2) | 1
         return cv2.blur(out, (k, 1)) if k > 3 else out
     strip = np.vstack([A, B]) if d == "u" else np.vstack([B, A])
     off = int(round(e * h)) if d == "u" else int(round((1 - e) * h))
     out = strip[off: off + h]
-    k = int(2 + 0.18 * h * math.sin(math.pi * min(max(p, 0), 1)) ** 1.2) | 1
+    k = int(2 + CINEMA_WHIP_BLUR * h * math.sin(math.pi * min(max(p, 0), 1)) ** 1.2) | 1
     return cv2.blur(out, (1, k)) if k > 3 else out
 
 
@@ -1800,7 +1803,14 @@ def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text
                 pose = cin_pose_at(plan["moves"], plan["strength"], t)
                 if TN and k >= N - TN:
                     p = (k - (N - TN) + 1) / float(TN)
-                    rl = _ease(p) * CINEMA_TRANSITION_RELAX
+                    rl = CINEMA_LEADIN_RELAX + (CINEMA_TRANSITION_RELAX - CINEMA_LEADIN_RELAX) * _ease(p)
+                    pose = dict(pose)
+                    for _key in ("tx", "ty", "dz"):
+                        pose[_key] *= (1.0 - rl)
+                elif TN and CINEMA_LEADIN_SECONDS > 0 and k >= N - TN - int(round(CINEMA_LEADIN_SECONDS * FPS)):
+                    _lead = max(int(round(CINEMA_LEADIN_SECONDS * FPS)), 1)
+                    q = (k - (N - TN - _lead) + 1) / float(_lead)
+                    rl = _ease(q) * CINEMA_LEADIN_RELAX
                     pose = dict(pose)
                     for _key in ("tx", "ty", "dz"):
                         pose[_key] *= (1.0 - rl)
