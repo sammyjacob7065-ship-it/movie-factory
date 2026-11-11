@@ -1428,6 +1428,8 @@ def cinema_plan(idx, scene, meta):
     if not static and isinstance(scene, dict):
         _nc = scene.get("no_camera")
         static = (_nc is True) or (isinstance(_nc, str) and _nc.strip().lower() in ("1", "true", "yes"))
+    if isinstance(scene, dict) and isinstance(scene.get("quiz"), dict) and scene["quiz"].get("questions"):
+        _DEV["quiz"] = scene["quiz"]               # the quiz written in the script (any number of questions)
     dev = parse_dev(scene)
     if dev:
         static = True                             # a live page is never moved by the camera
@@ -2365,7 +2367,7 @@ DEV_ENABLED = True
 DEV_CAPTURE_EVERY = 2            # take a browser picture every 2nd frame (the cursor still moves every frame)
 DEV_START_DELAY = 0.8            # seconds before the first step
 DEV_GAP = 0.35                   # pause between two steps
-_DEV = {"pw": None, "browser": None, "ctx": None, "page": None, "url": None, "servers": {}, "dead": False, "size": None}
+_DEV = {"quiz": None, "pw": None, "browser": None, "ctx": None, "page": None, "url": None, "servers": {}, "dead": False, "size": None}
 
 
 def _dev_split(text):
@@ -2407,7 +2409,11 @@ def parse_dev_steps(text):
         low = part.lower()
         q = _dev_q(part)
         rest = re.sub(r"^\w+\s*", "", part).strip()
-        if re.match(r"(?:click|tap|press the|choose|select|open|double[- ]click)\b", low):
+        if re.match(r"answer\b|(?:give\s+a\s+)?(?:right|correct|wrong)\s+answer\b", low):
+            steps.append({"do": "answer", "mode": "all" if re.search(r"\ball\b|every|each|whole|rest", low) else ("wrong" if re.search(r"wrong|incorrect", low) else "right")})
+        elif re.match(r"(?:next|continue|finish|see (?:my )?score)\b", low):
+            steps.append({"do": "next"})
+        elif re.match(r"(?:click|tap|press the|choose|select|open|double[- ]click)\b", low):
             tgt = q or re.sub(r"(?i)^(?:the\s+)?(?:button|link|tab|menu|option)?\s*", "", rest)
             if tgt:
                 steps.append({"do": "click", "target": tgt, "double": "double" in low})
@@ -2471,10 +2477,11 @@ def _dev_serve(folder):
 def _dev_real_url(url, tmp):
     """A github.com repo / folder / file link is downloaded (git clone) and served from this machine - no GitHub Pages needed.
     Any other link is opened as it is."""
-    m = re.match(r"^https?://(?:www\.)?github\.com/([^/\s]+)/([^/\s#?]+?)(?:\.git)?(?:/(?:tree|blob)/([^/\s]+)/?([^\s?#]*))?/?(?:[?#].*)?$", url)
+    m = re.match(r"^https?://(?:www\.)?github\.com/([^/\s]+)/([^/\s#?]+?)(?:\.git)?(?:/(?:tree|blob)/([^/\s]+)/?([^\s?#]*))?/?([?#].*)?$", url)
     if not m:
         return url
     user, repo, branch, sub = m.group(1), m.group(2), m.group(3), (m.group(4) or "").strip("/")
+    qs = m.group(5) or ""                          # e.g. ?lesson=cold-email is passed on to the page
     dest = os.path.join(tmp, f"devrepo_{user}_{repo}")
     if not os.path.isdir(dest):
         cmd = ["git", "clone", "--depth", "1"] + (["--branch", branch] if branch else []) + [f"https://github.com/{user}/{repo}.git", dest]
@@ -2502,7 +2509,7 @@ def _dev_real_url(url, tmp):
         if idx is None:
             raise RuntimeError("the repo has no .html page")
         path = (path + "/" + idx).strip("/")
-    return f"http://127.0.0.1:{port}/{path}"
+    return f"http://127.0.0.1:{port}/{path}{qs}"
 
 
 def _dev_page(url, tmp, W, H):
@@ -2516,6 +2523,8 @@ def _dev_page(url, tmp, W, H):
                 _DEV["browser"] = _DEV["pw"].chromium.launch(args=["--no-sandbox", "--disable-gpu"])
             _DEV["ctx"] = _DEV["browser"].new_context(viewport={"width": W, "height": H}, device_scale_factor=1, locale="en-US",
                                                       user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+            if _DEV.get("quiz"):                   # the lesson page shows the questions from the script instead of its own
+                _DEV["ctx"].add_init_script(script="window.__LESSON__ = " + json.dumps(_DEV["quiz"]).replace("</", "<\\/") + ";")
             _DEV["page"] = _DEV["ctx"].new_page()
             _DEV["size"], _DEV["url"] = (W, H), None
         except Exception as e:
@@ -2603,7 +2612,9 @@ def _dev_est(steps):
     tot = DEV_START_DELAY
     for s in steps:
         k = s["do"]
-        tot += {"click": 1.5, "hover": 1.1, "scroll": 1.4, "zoom": 0.3, "key": 0.5}.get(k, 0.0)
+        tot += {"click": 1.5, "hover": 1.1, "scroll": 1.4, "zoom": 0.3, "key": 0.5, "answer": 2.4, "next": 1.4}.get(k, 0.0)
+        if k == "answer" and s.get("mode") == "all":
+            tot += 3.4 * max(len((_DEV.get("quiz") or {}).get("questions") or []) - 1, 4)
         if k == "type":
             tot += 1.3 + 0.07 * len(s["text"])
         if k == "wait":
@@ -2742,7 +2753,41 @@ def dev_scene_frames(dev, duration, td, W, H, fps, tmp):
         page.keyboard.press(s["key"])
         yield from wait_until(now[0] + 0.4 * sp)
 
-    table = {"click": do_click, "hover": do_hover, "type": do_type, "scroll": do_scroll, "wait": do_wait, "zoom": do_zoom, "key": do_key}
+    def quiz_info():
+        try:
+            return page.evaluate("(() => { try { return {a: LESSON.questions[i].a, n: LESSON.questions[i].o.length, left: LESSON.questions.length - i, done: answered}; } catch (e) { return null; } })()")
+        except Exception:
+            return None
+
+    def do_answer_one(wrong=False):
+        info = quiz_info()
+        if not info or info.get("done"):
+            return
+        idx = info["a"]
+        if wrong:
+            idx = next((k for k in range(info["n"]) if k != info["a"]), info["a"])
+        yield from do_click({"target": "#opts .opt:nth-child(%d)" % (idx + 1)})
+        yield from wait_until(now[0] + 0.9 * sp)          # time to read the green / red note
+
+    def do_answer(s):
+        if s.get("mode") == "all":
+            for _ in range(60):
+                info = quiz_info()
+                if not info:
+                    break
+                yield from do_answer_one(False)
+                yield from do_click({"target": "#next"})
+                yield from wait_until(now[0] + 0.3 * sp)
+                nxt = quiz_info()
+                if not nxt or nxt.get("left", 0) <= 0 or (nxt.get("left") == info.get("left")):
+                    break
+        else:
+            yield from do_answer_one(s.get("mode") == "wrong")
+
+    def do_next(s):
+        yield from do_click({"target": "#next"})
+
+    table = {"answer": do_answer, "next": do_next, "click": do_click, "hover": do_hover, "type": do_type, "scroll": do_scroll, "wait": do_wait, "zoom": do_zoom, "key": do_key}
     N = max(int(round(duration * fps)), 2)
     idx, gen, next_start, last = 0, None, DEV_START_DELAY, None
 
