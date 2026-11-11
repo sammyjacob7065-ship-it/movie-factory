@@ -26,6 +26,7 @@ import math
 import os
 import random
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -990,6 +991,12 @@ def cin_pose_at(moves, strength, t):
     return pose
 
 
+def cin_pose_plan(plan, t):
+    if plan.get("static"):
+        return {"tx": 0.0, "ty": 0.0, "zoom": 0.0, "dz": 0.0, "roll": 0.0}
+    return cin_pose_at(plan["moves"], plan["strength"], t)
+
+
 def _cin_session(tmp):
     if _CIN["tried"]:
         return _CIN["sess"]
@@ -1080,9 +1087,23 @@ class _CinState:
     pass
 
 
-def cin_state(scene_index, image_path, tmp):
+def cin_state(scene_index, image_path, tmp, static=False):
     st = _CIN["states"].get(scene_index)
     if st is not None:
+        return st
+    if static:                                   # NO CAMERA scene: the picture is shown as it is (no depth blur, no zoom)
+        composite = os.path.join(tmp, f"cinecomp_{scene_index:03d}.png")
+        build_composite(image_path, composite)
+        img = cv2.imread(composite)
+        if img is None:
+            raise RuntimeError("cinema: the picture could not be read")
+        if img.shape[1] != WIDTH or img.shape[0] != HEIGHT:
+            img = cv2.resize(img, (WIDTH, HEIGHT), interpolation=cv2.INTER_AREA)
+        st = _CinState()
+        st.W, st.H, st.src, st.static = WIDTH, HEIGHT, img, True
+        for k in [k for k in _CIN["states"] if k < scene_index - 1]:
+            del _CIN["states"][k]
+        _CIN["states"][scene_index] = st
         return st
     composite = os.path.join(tmp, f"cinecomp_{scene_index:03d}.png")
     build_composite(image_path, composite)
@@ -1110,6 +1131,8 @@ def cin_state(scene_index, image_path, tmp):
 def cin_render(st, pose):
     """One frame of the picture seen from the camera position `pose`.
     The shifts follow a softened copy of the depth (st.Dd): hard depth edges would tear faces and buildings apart."""
+    if getattr(st, "static", False):
+        return st.src.copy()
     Dd = st.Dd
     ang = math.radians(pose["roll"])
     c, s = math.cos(ang), math.sin(ang)
@@ -1272,7 +1295,9 @@ def cin_finish_tools(W, H):
     return tools
 
 
-def cin_finish(frame, tools, k):
+def cin_finish(frame, tools, k, clean=False):
+    if clean and CINEMA_STATIC_CLEAN:             # NO CAMERA scene: nothing that could soften small screen text
+        return frame
     if CINEMA_SHARPEN > 0:
         blur = cv2.GaussianBlur(frame, (0, 0), 1.2 * max(frame.shape[1], frame.shape[0]) / 1920.0 + 0.4)
         frame = cv2.addWeighted(frame, 1.0 + CINEMA_SHARPEN, blur, -CINEMA_SHARPEN, 0)
@@ -1399,7 +1424,14 @@ def cinema_plan(idx, scene, meta):
     cam, tr = _strip(cam), _strip(tr)
     moves, strength = parse_camera(cam, idx)
     kind, d = parse_transition(tr, idx)
-    return {"moves": moves, "strength": strength, "kind": kind, "dir": d, "cam_text": cam, "tr_text": tr, "subscribe": parse_subscribe(scene), "end": parse_end(scene)}
+    static = bool(re.search(r"(?i)\bno[\s_-]*camera\b|\bcamera\s*[:=-]?\s*(?:off|none|still|static|locked)\b|\b(?:static|fixed|locked[\s-]?off)\s+(?:shot|camera|frame|screen)\b|\bstay(?:s)? still\b|\bnothing moves\b", cam or ""))
+    if not static and isinstance(scene, dict):
+        _nc = scene.get("no_camera")
+        static = (_nc is True) or (isinstance(_nc, str) and _nc.strip().lower() in ("1", "true", "yes"))
+    dev = parse_dev(scene)
+    if dev:
+        static = True                             # a live page is never moved by the camera
+    return {"dev": dev, "static": static, "overlays": parse_overlays(scene), "moves": moves, "strength": strength, "kind": kind, "dir": d, "cam_text": cam, "tr_text": tr, "subscribe": parse_subscribe(scene), "end": parse_end(scene)}
 
 
 # ---------------- SUBSCRIBE LABEL (v71): an animated subscribe button, placed by the script ----------------
@@ -1733,11 +1765,1044 @@ def _subscribe_audio(audio_path, t_click, duration, tmp, tag):
             return audio_path
 
 
+# ---------------- LABELS + ANIMATIONS (v82): on-screen text and motion, written in the script ----------------
+# In a scene you can write (nothing written = nothing added):
+#   LABEL: Create workflow | top right | box | 1.5s-4s          (text | where | style | when - all after the text are optional)
+#   ANIMATION: cursor to top right, click ; type "n8n" at center ; pop "Done!" at top
+#   ANIMATION: scroll up "long text of a book page ..."         (the page scrolls up while the voice reads)
+# Where: top / upper / middle / lower / bottom + left / center / right  (or 70%,30%).  Styles: tag, title, lower third, box, highlight, arrow, circle, underline.
+# Several LABEL / ANIMATION lines in one scene are allowed. The words are drawn by the video builder, so they are always sharp and exactly as written.
+OVERLAYS = True
+OVERLAY_ACCENT = (0, 196, 255)        # B, G, R of the accent colour (a warm yellow-orange)
+CINEMA_STATIC_CLEAN = True            # NO CAMERA scenes: no vignette and no film grain, so small screen text stays clear
+
+_ANIM_VERBS = r"cursor|mouse|pointer|click|clicks|clicking|type|types|typing|type-on|pop|pop-in|appear|appears|highlight|highlights|scroll|scrolls|scrolling|arrow|reveal|underline|draw"
+
+
+def _ov_clean(s, n=120):
+    s = re.sub(r"[<>{}]", "", str(s or ""))
+    return s.strip().strip("\"'“”‘’").strip()[:n]
+
+
+def _ov_pos(text):
+    """Words -> (x, y) as shares of the picture. None when no position is written."""
+    t = (text or "").lower()
+    m = re.search(r"(\d{1,3}(?:\.\d+)?)\s*%\s*[, /]\s*(\d{1,3}(?:\.\d+)?)\s*%", t)
+    if m:
+        return (min(max(float(m.group(1)) / 100.0, 0.03), 0.97), min(max(float(m.group(2)) / 100.0, 0.03), 0.97))
+    x = y = None
+    if re.search(r"\bleft\b", t):
+        x = 0.18
+    elif re.search(r"\bright\b", t):
+        x = 0.82
+    elif re.search(r"\b(?:center|centre|middle)\b", t):
+        x = 0.5
+    if re.search(r"\b(?:top|upper)\b", t):
+        y = 0.16 if re.search(r"\btop\b", t) else 0.28
+    elif re.search(r"\b(?:bottom)\b", t):
+        y = 0.84
+    elif re.search(r"\blower\b", t):
+        y = 0.72
+    elif re.search(r"\b(?:center|centre|middle)\b", t):
+        y = 0.5
+    if x is None and y is None:
+        return None
+    return (0.5 if x is None else x, 0.5 if y is None else y)
+
+
+def _ov_time(text):
+    """'1.5s-4s' / 'from 2s to 5s' / 'at 3s' -> (t0, t1 or None). None when not written."""
+    t = (text or "").lower()
+    m = re.search(r"(\d+(?:\.\d+)?)\s*s?\s*(?:-|–|to|until)\s*(\d+(?:\.\d+)?)\s*s\b", t)
+    if m:
+        return float(m.group(1)), float(m.group(2))
+    m = re.search(r"\b(?:at|from|after)\s*(\d+(?:\.\d+)?)\s*s\b", t) or re.search(r"\b(\d+(?:\.\d+)?)\s*s\b", t)
+    if m:
+        return float(m.group(1)), None
+    return None
+
+
+def _ov_style(text):
+    t = (text or "").lower()
+    if re.search(r"lower[\s-]?third|banner", t):
+        return "lower"
+    if re.search(r"\btitle\b|heading", t):
+        return "title"
+    if re.search(r"\barrow\b|pointer|point", t):
+        return "arrow"
+    if re.search(r"highlight|marker", t):
+        return "highlight"
+    if re.search(r"circle|ring|oval", t):
+        return "circle"
+    if re.search(r"underline", t):
+        return "underline"
+    if re.search(r"\bbox\b|callout|frame|rectangle|outline", t):
+        return "box"
+    if re.search(r"\btag\b|pill|note|label|badge|chip", t):
+        return "tag"
+    return None
+
+
+def parse_overlays(scene):
+    """Reads the scene's LABEL and ANIMATION lines. Returns {"labels": [...], "anims": [...]} or None."""
+    if not OVERLAYS or not isinstance(scene, dict):
+        return None
+    labels, anims = [], []
+    raw_l = scene.get("overlay_labels")
+    if isinstance(raw_l, str) and raw_l.strip():
+        for part in re.split(r"\s*;;\s*", raw_l.strip()):
+            if not part.strip():
+                continue
+            segs = [s.strip() for s in part.split("|")]
+            text = _ov_clean(segs[0], 90)
+            if not text:
+                continue
+            lab = {"text": text, "pos": None, "style": None, "t0": None, "t1": None}
+            for s in segs[1:]:
+                tm = _ov_time(s)
+                if tm and not re.search(r"[a-z]{3,}", re.sub(r"\b(?:at|from|after|to|until|s)\b", "", s.lower())):
+                    lab["t0"], lab["t1"] = tm
+                    continue
+                st = _ov_style(s)
+                ps = _ov_pos(s)
+                if st and not lab["style"]:
+                    lab["style"] = st
+                if ps and not lab["pos"]:
+                    lab["pos"] = ps
+                if tm and lab["t0"] is None:
+                    lab["t0"], lab["t1"] = tm
+            labels.append(lab)
+    raw_a = scene.get("overlay_anims")
+    if isinstance(raw_a, str) and raw_a.strip():
+        for line in re.split(r"\s*;;\s*", raw_a.strip()):
+            line = line.strip()
+            if not line:
+                continue
+            if re.match(r"(?i)^(?:scroll|scrolls|scrolling|read|reading)\b", line):
+                m = re.match(r"(?is)^(?:scroll\w*|read\w*)\s*(up|down)?\s*[:|\-–—]?\s*(.*)$", line)
+                body = _ov_clean(m.group(2) if m else "", 4000)
+                if body:
+                    anims.append({"kind": "scroll", "dir": (m.group(1) or "up").lower() if m else "up", "text": body})
+                continue
+            for act in re.split(r"\s*(?:;|\bthen\b|\band then\b)\s*", line):
+                act = act.strip(" ,.")
+                if not act or not re.search(r"(?i)\b(?:" + _ANIM_VERBS + r")\b", act):
+                    continue
+                low = act.lower()
+                quoted = re.search(r"[\"“](.+?)[\"”]", act) or re.search(r"'([^']{2,})'", act)
+                qtext = _ov_clean(quoted.group(1), 90) if quoted else ""
+                pos = _ov_pos(re.sub(r"[\"“].+?[\"”]", " ", act))
+                if re.match(r"(?i)^(?:cursor|mouse|pointer|click|double)", act) or re.search(r"\bcursor\b|\bmouse\b|\bpointer\b", low):
+                    anims.append({"kind": "cursor", "pos": pos, "click": bool(re.search(r"\bclick", low)), "double": "double" in low})
+                elif re.match(r"(?i)^(?:type|types|typing)", act):
+                    if not qtext:
+                        qtext = _ov_clean(re.sub(r"(?i)^(?:type-on|types?|typing)\s*(?:text)?\s*", "", re.sub(r"(?i)\b(?:at|in|into)\b.*$", "", act)), 90)
+                    if qtext:
+                        anims.append({"kind": "type", "text": qtext, "pos": pos})
+                elif re.match(r"(?i)^(?:pop|pop-in|appear|appears|reveal)", act):
+                    if not qtext:
+                        qtext = _ov_clean(re.sub(r"(?i)^(?:pop-in|pop|appears?|reveal)\s*(?:up)?\s*", "", re.sub(r"(?i)\b(?:at|in)\s+(?:the\s+)?(?:top|bottom|upper|lower|middle|center|centre|left|right).*$", "", act)), 90)
+                    anims.append({"kind": "pop", "text": qtext, "pos": pos})
+                elif re.match(r"(?i)^(?:highlight|underline|arrow|draw)", act):
+                    anims.append({"kind": "highlight", "text": qtext, "pos": pos, "style": _ov_style(act) or "highlight"})
+    if not labels and not anims:
+        return None
+    return {"labels": labels[:8], "anims": anims[:14]}
+
+
+def _ov_font(size):
+    from PIL import ImageFont
+    try:
+        fp = find_font()
+        return ImageFont.truetype(fp, max(8, int(size))) if fp else ImageFont.load_default()
+    except Exception:
+        return ImageFont.load_default()
+
+
+def _ov_text_rgba(text, size, fill=(255, 255, 255), bg=None, padx=0, pady=0, radius=0, border=None, shadow=True, SS=2):
+    """Text (optionally on a rounded pill) as a smooth RGBA numpy picture."""
+    from PIL import Image, ImageDraw
+    f = _ov_font(size * SS)
+    probe = ImageDraw.Draw(Image.new("RGBA", (4, 4)))
+    tw = int(probe.textlength(text, font=f))
+    asc, desc = f.getmetrics() if hasattr(f, "getmetrics") else (size * SS, 0)
+    th = int(asc + desc)
+    px, py = int(padx * SS), int(pady * SS)
+    W_, H_ = tw + 2 * px + 8 * SS, th + 2 * py + 8 * SS
+    img = Image.new("RGBA", (W_, H_), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    if bg is not None:
+        d.rounded_rectangle([4 * SS, 4 * SS, W_ - 4 * SS, H_ - 4 * SS], radius=int(radius * SS), fill=bg, outline=border, width=int(3 * SS) if border else 0)
+    x, y = 4 * SS + px, 4 * SS + py
+    if shadow and bg is None:
+        d.text((x + 2 * SS, y + 3 * SS), text, font=f, fill=(0, 0, 0, 190))
+    d.text((x, y), text, font=f, fill=tuple(fill) + (255,))
+    img = img.resize((max(1, W_ // SS), max(1, H_ // SS)), Image.LANCZOS)
+    return np.asarray(img).copy()
+
+
+def _ov_blit(frame, rgba, cx, cy, scale=1.0, alpha=1.0, anchor="c"):
+    """Lay an RGBA picture on a BGR frame (in place). anchor: c = centred on (cx, cy), tl = top-left corner at (cx, cy)."""
+    if alpha <= 0.003 or scale <= 0.01:
+        return
+    if abs(scale - 1.0) > 0.01:
+        rgba = cv2.resize(rgba, (max(1, int(rgba.shape[1] * scale)), max(1, int(rgba.shape[0] * scale))), interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR)
+    h, w = rgba.shape[:2]
+    x0 = int(round(cx - w / 2.0)) if anchor == "c" else int(round(cx))
+    y0 = int(round(cy - h / 2.0)) if anchor == "c" else int(round(cy))
+    H_, W_ = frame.shape[:2]
+    xa, ya, xb, yb = max(x0, 0), max(y0, 0), min(x0 + w, W_), min(y0 + h, H_)
+    if xb <= xa or yb <= ya:
+        return
+    sub = rgba[ya - y0: yb - y0, xa - x0: xb - x0]
+    a = (sub[..., 3:4].astype(np.float32) / 255.0) * min(alpha, 1.0)
+    roi = frame[ya:yb, xa:xb].astype(np.float32)
+    frame[ya:yb, xa:xb] = (roi * (1.0 - a) + sub[..., [2, 1, 0]].astype(np.float32) * a).astype(np.uint8)
+
+
+def _ov_ob(x):
+    return _ease_out_back(x)
+
+
+class _OvItem:
+    t0 = 0.0
+    t1 = 1e9
+
+    def active(self, t):
+        return self.t0 <= t <= self.t1
+
+    def fade(self, t, fin=0.25, fout=0.3):
+        a = min(max((t - self.t0) / fin, 0.0), 1.0)
+        b = min(max((self.t1 - t) / fout, 0.0), 1.0)
+        a = a * a * (3 - 2 * a)
+        return a * (b * b * (3 - 2 * b))
+
+
+class _OvTag(_OvItem):
+    """A pill with text that pops in."""
+
+    def __init__(self, text, pos, W, H, u, t0, t1):
+        self.pos, self.W, self.H, self.t0, self.t1 = pos, W, H, t0, t1
+        self.img = _ov_text_rgba(text, 40 * u, fill=(20, 20, 20), bg=(255, 255, 255, 235), padx=22 * u, pady=10 * u, radius=26 * u, border=(OVERLAY_ACCENT[2], OVERLAY_ACCENT[1], OVERLAY_ACCENT[0], 255))
+
+    def draw(self, frame, t):
+        p = min(max((t - self.t0) / 0.38, 0.0), 1.0)
+        _ov_blit(frame, self.img, self.pos[0] * self.W, self.pos[1] * self.H, scale=0.55 + 0.45 * _ov_ob(p), alpha=self.fade(t))
+
+
+class _OvTitle(_OvItem):
+    def __init__(self, text, pos, W, H, u, t0, t1):
+        self.pos, self.W, self.H, self.t0, self.t1 = pos, W, H, t0, t1
+        size = 92 * u
+        while size > 24 * u:
+            img = _ov_text_rgba(text, size, fill=(255, 255, 255))
+            if img.shape[1] <= W * 0.9:
+                break
+            size *= 0.9
+        self.img = img
+
+    def draw(self, frame, t):
+        p = min(max((t - self.t0) / 0.5, 0.0), 1.0)
+        e = p * p * (3 - 2 * p)
+        _ov_blit(frame, self.img, self.pos[0] * self.W, self.pos[1] * self.H + (1 - e) * 18, alpha=self.fade(t, 0.5, 0.35))
+
+
+class _OvLower(_OvItem):
+    def __init__(self, text, pos, W, H, u, t0, t1):
+        self.pos, self.W, self.H, self.t0, self.t1 = pos, W, H, t0, t1
+        txt = _ov_text_rgba(text, 44 * u, fill=(255, 255, 255), shadow=False)
+        from PIL import Image
+        pad = int(26 * u)
+        h, w = txt.shape[0] + int(18 * u), txt.shape[1] + 2 * pad + int(14 * u)
+        bar = np.zeros((h, w, 4), np.uint8)
+        bar[..., :3] = (20, 20, 20)
+        bar[..., 3] = 205
+        bar[:, :max(4, int(8 * u)), :3] = (OVERLAY_ACCENT[2], OVERLAY_ACCENT[1], OVERLAY_ACCENT[0])
+        bar[:, :max(4, int(8 * u)), 3] = 255
+        y = (h - txt.shape[0]) // 2
+        sub = bar[y:y + txt.shape[0], pad:pad + txt.shape[1]]
+        a = txt[..., 3:4].astype(np.float32) / 255.0
+        sub[..., :3] = (sub[..., :3] * (1 - a) + txt[..., :3] * a).astype(np.uint8)
+        sub[..., 3] = np.maximum(sub[..., 3], txt[..., 3])
+        self.img = bar
+
+    def draw(self, frame, t):
+        p = min(max((t - self.t0) / 0.45, 0.0), 1.0)
+        e = 1 - (1 - p) ** 3
+        x = self.W * 0.06 - (1 - e) * self.img.shape[1]
+        y = self.pos[1] * self.H - self.img.shape[0] / 2.0
+        _ov_blit(frame, self.img, x, y, alpha=self.fade(t, 0.2, 0.3), anchor="tl")
+
+
+class _OvBox(_OvItem):
+    """A box / highlight / circle / underline drawn around an area, with an optional word on it."""
+
+    def __init__(self, text, pos, W, H, u, t0, t1, style="box", wfrac=0.26, hfrac=0.12):
+        self.pos, self.W, self.H, self.t0, self.t1, self.style, self.u = pos, W, H, t0, t1, style, u
+        self.bw, self.bh = int(W * wfrac), int(H * hfrac)
+        self.tag = _ov_text_rgba(text, 34 * u, fill=(20, 20, 20), bg=(255, 255, 255, 235), padx=16 * u, pady=7 * u, radius=20 * u) if text else None
+
+    def draw(self, frame, t):
+        a = self.fade(t, 0.3, 0.3)
+        if a <= 0.01:
+            return
+        p = min(max((t - self.t0) / 0.45, 0.0), 1.0)
+        e = 1 - (1 - p) ** 3
+        cx, cy = int(self.pos[0] * self.W), int(self.pos[1] * self.H)
+        pulse = 1.0 + 0.025 * math.sin((t - self.t0) * 5.0)
+        hw, hh = int(self.bw / 2 * (0.6 + 0.4 * e) * pulse), int(self.bh / 2 * (0.6 + 0.4 * e) * pulse)
+        col = OVERLAY_ACCENT
+        ov = frame.copy()
+        th = max(3, int(5 * self.u))
+        if self.style == "highlight":
+            cv2.rectangle(ov, (cx - hw, cy - hh), (cx + hw, cy + hh), col, -1)
+            frame[:] = cv2.addWeighted(ov, 0.30 * a, frame, 1 - 0.30 * a, 0)
+            cv2.rectangle(frame, (cx - hw, cy - hh), (cx + hw, cy + hh), col, th, cv2.LINE_AA)
+        elif self.style == "circle":
+            cv2.ellipse(frame, (cx, cy), (hw, hh), 0, 0, 360 * e, col, th, cv2.LINE_AA)
+        elif self.style == "underline":
+            x1 = int(cx - hw + 2 * hw * e)
+            cv2.line(frame, (cx - hw, cy + hh), (x1, cy + hh), col, th + 1, cv2.LINE_AA)
+        else:
+            cv2.rectangle(frame, (cx - hw, cy - hh), (cx + hw, cy + hh), col, th, cv2.LINE_AA)
+        if self.tag is not None:
+            _ov_blit(frame, self.tag, cx - hw + self.tag.shape[1] / 2.0, cy - hh - self.tag.shape[0] / 2.0 - 4, alpha=a)
+
+
+class _OvArrow(_OvItem):
+    def __init__(self, text, pos, W, H, u, t0, t1):
+        self.pos, self.W, self.H, self.t0, self.t1, self.u = pos, W, H, t0, t1, u
+        self.tag = _ov_text_rgba(text, 36 * u, fill=(20, 20, 20), bg=(255, 255, 255, 235), padx=16 * u, pady=8 * u, radius=22 * u) if text else None
+
+    def draw(self, frame, t):
+        a = self.fade(t, 0.3, 0.3)
+        if a <= 0.01:
+            return
+        p = min(max((t - self.t0) / 0.5, 0.0), 1.0)
+        e = 1 - (1 - p) ** 3
+        tx, ty = self.pos[0] * self.W, self.pos[1] * self.H
+        dx = -0.14 * self.W if self.pos[0] > 0.5 else 0.14 * self.W
+        sx, sy = tx + dx, ty - 0.12 * self.H
+        ex, ey = sx + (tx - sx) * e, sy + (ty - sy) * e
+        col = OVERLAY_ACCENT
+        th = max(4, int(7 * self.u))
+        cv2.line(frame, (int(sx), int(sy)), (int(ex), int(ey)), col, th, cv2.LINE_AA)
+        ang = math.atan2(ey - sy, ex - sx)
+        hl = 26 * self.u
+        for s_ in (-0.5, 0.5):
+            cv2.line(frame, (int(ex), int(ey)), (int(ex - hl * math.cos(ang + s_)), int(ey - hl * math.sin(ang + s_))), col, th, cv2.LINE_AA)
+        if self.tag is not None:
+            _ov_blit(frame, self.tag, sx, sy - self.tag.shape[0] * 0.9, alpha=a)
+
+
+class _OvType(_OvItem):
+    """A text field where the words are typed one letter at a time."""
+
+    def __init__(self, text, pos, W, H, u, t0, t1, tdur):
+        from PIL import Image, ImageDraw
+        self.text, self.pos, self.W, self.H, self.u, self.t0, self.t1, self.tdur = text, pos, W, H, u, t0, t1, max(tdur, 0.3)
+        self.f = _ov_font(40 * u)
+        probe = ImageDraw.Draw(Image.new("RGBA", (4, 4)))
+        self.tw = int(probe.textlength(text, font=self.f))
+        self.pad = int(22 * u)
+        self.h = int(40 * u * 1.7)
+        self.w = self.tw + 2 * self.pad + int(14 * u)
+        self.u_ = u
+
+    def draw(self, frame, t):
+        from PIL import Image, ImageDraw
+        a = self.fade(t, 0.2, 0.3)
+        if a <= 0.01:
+            return
+        n = int(len(self.text) * min(max((t - self.t0) / self.tdur, 0.0), 1.0) + 0.0001)
+        S = 2
+        img = Image.new("RGBA", (self.w * S, self.h * S), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        d.rounded_rectangle([2 * S, 2 * S, (self.w - 2) * S, (self.h - 2) * S], radius=int(14 * self.u * S), fill=(255, 255, 255, 240), outline=(OVERLAY_ACCENT[2], OVERLAY_ACCENT[1], OVERLAY_ACCENT[0], 255), width=3 * S)
+        f2 = _ov_font(40 * self.u * S)
+        shown = self.text[:n]
+        d.text((self.pad * S, int(self.h * S * 0.2)), shown, font=f2, fill=(25, 25, 25, 255))
+        if int((t - self.t0) * 2) % 2 == 0 or n < len(self.text):
+            cx = self.pad * S + int(d.textlength(shown, font=f2)) + 3 * S
+            d.rectangle([cx, int(self.h * S * 0.18), cx + 3 * S, int(self.h * S * 0.82)], fill=(25, 25, 25, 255))
+        img = img.resize((self.w, self.h), Image.LANCZOS)
+        _ov_blit(frame, np.asarray(img).copy(), self.pos[0] * self.W, self.pos[1] * self.H, alpha=a)
+
+
+class _OvScroll(_OvItem):
+    """A page of text that scrolls up while it is read; a bar marks the line being read."""
+
+    def __init__(self, text, W, H, u, t0, t1):
+        from PIL import Image, ImageDraw
+        self.W, self.H, self.t0, self.t1 = W, H, t0, t1
+        cw = int(W * (0.62 if W >= H else 0.88))
+        ch = int(H * (0.80 if W >= H else 0.66))
+        self.cw, self.ch = cw, ch
+        S = 2
+        fs = 36 * u * (1.0 if W >= H else 0.95)
+        f = _ov_font(fs * S)
+        pad = int(46 * u * S)
+        probe = ImageDraw.Draw(Image.new("RGBA", (4, 4)))
+        lines = []
+        for para in re.split(r"\s*(?:\\n|\n|¶)\s*", text):
+            words, cur = para.split(), ""
+            for w_ in words:
+                t_ = (cur + " " + w_).strip()
+                if probe.textlength(t_, font=f) <= cw * S - 2 * pad or not cur:
+                    cur = t_
+                else:
+                    lines.append(cur)
+                    cur = w_
+            lines.append(cur)
+            lines.append("")
+        while lines and lines[-1] == "":
+            lines.pop()
+        self.lh = int(fs * 1.62 * S)
+        self.n_lines = len(lines)
+        th = max(len(lines) * self.lh + 2 * pad, int(ch * S))
+        big = Image.new("RGBA", (cw * S, th), (251, 247, 238, 255))
+        d = ImageDraw.Draw(big)
+        for i, l in enumerate(lines):
+            d.text((pad, pad + i * self.lh), l, font=f, fill=(32, 32, 36, 255))
+        self.big = np.asarray(big.resize((cw, th // S), Image.LANCZOS)).copy()
+        self.pad_px = pad // S
+        self.lh_px = self.lh / float(S)
+        shadow = np.zeros((ch + 40, cw + 40, 4), np.uint8)
+        shadow[..., 3] = 0
+        cv2.rectangle(shadow, (20, 26), (cw + 20, ch + 26), (0, 0, 0, 120), -1)
+        self.shadow = cv2.GaussianBlur(shadow, (0, 0), 12)
+
+    def draw(self, frame, t):
+        a = self.fade(t, 0.4, 0.4)
+        if a <= 0.01:
+            return
+        p = min(max((t - self.t0 - 0.3) / max(self.t1 - self.t0 - 0.9, 0.5), 0.0), 1.0)
+        total = self.big.shape[0]
+        read_y = self.pad_px + p * max(total - 2 * self.pad_px, 1)
+        band = 0.40 * self.ch
+        off = int(max(0.0, min(read_y - band, total - self.ch)))
+        crop = self.big[off: off + self.ch].copy()
+        if crop.shape[0] < self.ch:
+            crop = np.vstack([crop, np.full((self.ch - crop.shape[0], crop.shape[1], 4), (251, 247, 238, 255), np.uint8)])
+        by = int(read_y - off)
+        y0, y1 = max(by - int(self.lh_px * 0.15), 0), min(by + int(self.lh_px * 0.95), self.ch)
+        if y1 > y0:
+            seg = crop[y0:y1, :, :3].astype(np.float32)
+            tint = np.array([60, 215, 255], np.float32)     # RGB of a yellow marker
+            crop[y0:y1, :, :3] = (seg * 0.62 + tint * 0.38).astype(np.uint8)
+        _ov_blit(frame, self.shadow, self.W / 2.0, self.H / 2.0 + 6, alpha=a)
+        _ov_blit(frame, crop, self.W / 2.0, self.H / 2.0, alpha=a)
+
+
+def _ov_arrow_img(u):
+    from PIL import Image, ImageDraw
+    S = 4
+    sz = int(46 * u)
+    img = Image.new("RGBA", (sz * S + 40, sz * S + 40), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    pts = [(0, 0), (0, 0.80), (0.20, 0.62), (0.34, 0.95), (0.47, 0.89), (0.33, 0.57), (0.58, 0.57)]
+    pts = [(20 + x * sz * S, 20 + y * sz * S) for x, y in pts]
+    sh = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ImageDraw.Draw(sh).polygon([(x + 5 * S, y + 6 * S) for x, y in pts], fill=(0, 0, 0, 110))
+    img = Image.alpha_composite(sh, img)
+    d = ImageDraw.Draw(img)
+    d.polygon(pts, fill=(255, 255, 255, 255), outline=(15, 15, 15, 255), width=int(2.6 * S))
+    img = img.resize((img.width // S, img.height // S), Image.LANCZOS)
+    return np.asarray(img).copy()
+
+
+class _OvCursor(_OvItem):
+    """A mouse arrow that glides (on a curve) to places and clicks, like a real laptop."""
+
+    def __init__(self, steps, W, H, u, t_end):
+        self.W, self.H, self.u = W, H, u
+        self.steps = steps          # [{"t0","t1","a":(x,y),"b":(x,y),"click":t or None,"double":bool}]
+        self.t0 = max(0.0, steps[0]["t0"] - 0.25)
+        self.t1 = t_end
+        self.img = _ov_arrow_img(u)
+        self.off = 20.0
+
+    def _pos(self, t):
+        pos = self.steps[0]["a"]
+        for s in self.steps:
+            if t < s["t0"]:
+                return pos
+            if t <= s["t1"]:
+                p = (t - s["t0"]) / max(s["t1"] - s["t0"], 1e-3)
+                e = p * p * (3 - 2 * p)
+                ax, ay = s["a"]
+                bx, by = s["b"]
+                dist = math.hypot(bx - ax, by - ay)
+                nx, ny = (-(by - ay), (bx - ax))
+                nl = math.hypot(nx, ny) or 1.0
+                bend = 0.12 * dist
+                cx, cy = (ax + bx) / 2.0 + nx / nl * bend, (ay + by) / 2.0 + ny / nl * bend
+                x = (1 - e) ** 2 * ax + 2 * (1 - e) * e * cx + e ** 2 * bx
+                y = (1 - e) ** 2 * ay + 2 * (1 - e) * e * cy + e ** 2 * by
+                return (x, y)
+            pos = s["b"]
+        return pos
+
+    def draw(self, frame, t):
+        a = self.fade(t, 0.25, 0.35)
+        if a <= 0.01:
+            return
+        x, y = self._pos(t)
+        px, py = x * self.W, y * self.H
+        press = 1.0
+        for s in self.steps:
+            for ct in ([s["click"], s["click"] + 0.28] if (s.get("click") is not None and s.get("double")) else ([s["click"]] if s.get("click") is not None else [])):
+                dt = t - ct
+                if 0 <= dt < 0.5:
+                    r = (dt / 0.5)
+                    rad = int((14 + 44 * r) * self.u)
+                    ov = frame.copy()
+                    cv2.circle(ov, (int(px), int(py)), rad, OVERLAY_ACCENT, max(2, int(5 * self.u * (1 - r))), cv2.LINE_AA)
+                    frame[:] = cv2.addWeighted(ov, 0.85 * (1 - r) * a, frame, 1 - 0.85 * (1 - r) * a, 0)
+                if 0 <= dt < 0.14:
+                    press = 0.82
+        _ov_blit(frame, self.img, px - self.off * 1.0, py - self.off * 1.0, scale=press, alpha=a, anchor="tl")
+
+
+class _Overlay:
+    def __init__(self, spec, W, H, duration, td):
+        self.W, self.H = W, H
+        u = min(W, H) / 1080.0
+        avail = max(duration - (td + 0.12 if td else 0.25), 0.8)
+        self.items = []
+        # --- script labels: fixed words placed on the picture
+        for i, lab in enumerate(spec.get("labels", [])):
+            st = lab["style"] or ("tag")
+            pos = lab["pos"] or ((0.5, 0.14) if st == "title" else ((0.5, 0.80) if st == "lower" else (0.5, 0.5)))
+            t0 = lab["t0"] if lab["t0"] is not None else 0.4 + 0.6 * i
+            t1 = lab["t1"] if lab["t1"] is not None else avail
+            t0, t1 = min(t0, avail - 0.4), min(max(t1, t0 + 0.6), avail)
+            self._add_label(st, lab["text"], pos, u, t0, t1)
+        # --- animations: sequenced one after the other
+        tc = 0.5
+        steps, cur = [], (0.78, 0.84)
+        plan = []
+        for an in spec.get("anims", []):
+            k = an["kind"]
+            if k == "cursor":
+                tgt = an.get("pos") or cur
+                dist = math.hypot(tgt[0] - cur[0], tgt[1] - cur[1])
+                dur = 0.55 + min(dist, 1.2) * 0.8 if tgt != cur else 0.0
+                plan.append(("cursor", an, tc, dur, cur, tgt))
+                tc += dur
+                if an.get("click"):
+                    tc += 0.45 + (0.28 if an.get("double") else 0.0)
+                cur = tgt
+            elif k == "type":
+                dur = min(3.2, 0.07 * len(an["text"]) + 0.2)
+                plan.append(("type", an, tc, dur, None, None))
+                tc += dur + 0.3
+            elif k == "pop":
+                plan.append(("pop", an, tc, 0.4, None, None))
+                tc += 0.55
+            elif k == "highlight":
+                plan.append(("highlight", an, tc, 0.5, None, None))
+                tc += 0.6
+            elif k == "scroll":
+                plan.append(("scroll", an, 0.35, 0.0, None, None))
+        f = 1.0
+        if tc > avail - 0.4:
+            f = max((avail - 0.5) / max(tc - 0.5, 0.1), 0.35)
+        sc = lambda x: 0.5 + (x - 0.5) * f
+        cur_steps = []
+        for (k, an, t0, dur, a, b) in plan:
+            t0 = sc(t0) if k != "scroll" else t0
+            dur = dur * f
+            if k == "cursor":
+                if dur > 0:
+                    st_ = {"t0": t0, "t1": t0 + dur, "a": a, "b": b, "click": None, "double": an.get("double", False)}
+                    if an.get("click"):
+                        st_["click"] = t0 + dur + 0.12 * f
+                    cur_steps.append(st_)
+                elif an.get("click"):
+                    cur_steps.append({"t0": t0, "t1": t0, "a": a, "b": b, "click": t0 + 0.1, "double": an.get("double", False)})
+            elif k == "type":
+                self.items.append(_OvType(an["text"], an.get("pos") or (0.5, 0.5), W, H, u, t0, avail, dur))
+            elif k == "pop":
+                if an.get("text"):
+                    self.items.append(_OvTag(an["text"], an.get("pos") or (0.5, 0.5), W, H, u, t0, avail))
+            elif k == "highlight":
+                self._add_label(an.get("style", "highlight"), an.get("text", ""), an.get("pos") or (0.5, 0.5), u, t0, avail)
+            elif k == "scroll":
+                self.items.append(_OvScroll(an["text"], W, H, u, t0, avail))
+        if cur_steps:
+            self.items.append(_OvCursor(cur_steps, W, H, u, avail))
+        self.items.sort(key=lambda i: (isinstance(i, _OvCursor), i.t0))
+
+    def _add_label(self, st, text, pos, u, t0, t1):
+        W, H = self.W, self.H
+        if st == "title":
+            self.items.append(_OvTitle(text, pos, W, H, u, t0, t1))
+        elif st == "lower":
+            self.items.append(_OvLower(text, pos, W, H, u, t0, t1))
+        elif st == "arrow":
+            self.items.append(_OvArrow(text, pos, W, H, u, t0, t1))
+        elif st in ("box", "highlight", "circle", "underline"):
+            self.items.append(_OvBox(text, pos, W, H, u, t0, t1, style=st, hfrac=(0.05 if st == "underline" else 0.12)))
+        else:
+            if text:
+                self.items.append(_OvTag(text, pos, W, H, u, t0, t1))
+
+    def draw(self, frame, t):
+        for it in self.items:
+            if it.active(t):
+                it.draw(frame, t)
+        return frame
+
+
+# ---------------- DEVELOPER SCREEN (v83): a real, live web page on the screen, driven by the script ----------------
+# In a scene (or after /Developer at the top of the script, then every scene keeps the same screen) write:
+#   SCREEN: https://github.com/YourName/your-lesson-repo            (a GitHub repo, a repo file, or any web page / GitHub Pages link)
+#   STEPS: click "Start" ; type "Jacob" in "Name" ; scroll down ; click "Submit" ; wait 2s
+# A real browser opens the page, the cursor glides and clicks, text is typed, the page scrolls - all while the voice is speaking.
+# If the page cannot be opened, the scene simply keeps its normal picture. Scenes without SCREEN are not touched.
+DEV_ENABLED = True
+DEV_CAPTURE_EVERY = 2            # take a browser picture every 2nd frame (the cursor still moves every frame)
+DEV_START_DELAY = 0.8            # seconds before the first step
+DEV_GAP = 0.35                   # pause between two steps
+_DEV = {"pw": None, "browser": None, "ctx": None, "page": None, "url": None, "servers": {}, "dead": False, "size": None}
+
+
+def _dev_split(text):
+    """Split on ; or ;; or the word 'then', but not inside quotes."""
+    parts, cur, q = [], "", None
+    s = str(text or "")
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if q:
+            cur += ch
+            if ch == q:
+                q = None
+        elif ch in "\"“'" and (ch != "'" or not cur or not cur[-1].isalnum()):
+            q = "”" if ch == "“" else ch
+            cur += ch
+        elif ch == ";":
+            parts.append(cur)
+            cur = ""
+        elif s[i:i + 6].lower() == " then " :
+            parts.append(cur)
+            cur = ""
+            i += 5
+        else:
+            cur += ch
+        i += 1
+    parts.append(cur)
+    return [p.strip(" ,.\n") for p in parts if p.strip(" ,.\n")]
+
+
+def _dev_q(s):
+    m = re.search(r"[\"“](.+?)[\"”]", s) or re.search(r"(?<!\w)'([^']+)'(?!\w)", s)
+    return m.group(1).strip() if m else None
+
+
+def parse_dev_steps(text):
+    steps = []
+    for part in _dev_split(text):
+        low = part.lower()
+        q = _dev_q(part)
+        rest = re.sub(r"^\w+\s*", "", part).strip()
+        if re.match(r"(?:click|tap|press the|choose|select|open|double[- ]click)\b", low):
+            tgt = q or re.sub(r"(?i)^(?:the\s+)?(?:button|link|tab|menu|option)?\s*", "", rest)
+            if tgt:
+                steps.append({"do": "click", "target": tgt, "double": "double" in low})
+        elif re.match(r"(?:type|enter|write|fill|input)\b", low):
+            m = re.match(r"(?is)^\w+\s+[\"“](.+?)[\"”]\s*(?:(?:in|into|on|inside)\s+(?:the\s+)?(?:field\s+|box\s+)?(?:[\"“](.+?)[\"”]|(\S.*)))?$", part)
+            if m:
+                steps.append({"do": "type", "text": m.group(1), "target": (m.group(2) or m.group(3) or "").strip()})
+        elif re.match(r"(?:hover|point|move)\b", low):
+            tgt = q or re.sub(r"(?i)^(?:over|to|at)\s+(?:the\s+)?", "", rest)
+            if tgt:
+                steps.append({"do": "hover", "target": tgt})
+        elif re.match(r"scroll", low):
+            if q:
+                steps.append({"do": "scroll", "to": q})
+            else:
+                n = re.search(r"(\d+)\s*(?:px|pixels)?", low)
+                d = "up" if "up" in low or "top" in low else "down"
+                steps.append({"do": "scroll", "dir": d, "amount": int(n.group(1)) if n else None, "full": bool(re.search(r"bottom|top|end", low))})
+        elif re.match(r"wait|pause", low):
+            n = re.search(r"(\d+(?:\.\d+)?)", low)
+            steps.append({"do": "wait", "seconds": min(float(n.group(1)) if n else 1.0, 8.0)})
+        elif re.match(r"zoom", low):
+            n = re.search(r"(\d+)", low)
+            if n:
+                steps.append({"do": "zoom", "pct": min(max(int(n.group(1)), 60), 250)})
+        elif re.match(r"(?:key|press|hit)\b", low):
+            m = re.search(r"\b(enter|return|tab|escape|esc|space|arrowdown|arrowup|down|up|backspace)\b", low)
+            if m:
+                k = {"return": "Enter", "esc": "Escape", "down": "ArrowDown", "up": "ArrowUp", "arrowdown": "ArrowDown", "arrowup": "ArrowUp"}.get(m.group(1), m.group(1).capitalize())
+                steps.append({"do": "key", "key": k})
+    return steps[:40]
+
+
+def parse_dev(scene):
+    """Returns {"url","steps"} when the scene has a SCREEN line, else None."""
+    if not DEV_ENABLED or not isinstance(scene, dict):
+        return None
+    url = str(scene.get("screen_url") or "").strip()
+    if not url:
+        return None
+    m = re.search(r"https?://[^\s\"'<>)]+", url)
+    if not m:
+        return None
+    return {"url": m.group(0).rstrip(".,;"), "steps": str(scene.get("screen_steps") or "")}
+
+
+def _dev_serve(folder):
+    import http.server, functools, threading
+    if folder in _DEV["servers"]:
+        return _DEV["servers"][folder]
+
+    class _Q(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(_Q, directory=folder))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    _DEV["servers"][folder] = srv.server_address[1]
+    return srv.server_address[1]
+
+
+def _dev_real_url(url, tmp):
+    """A github.com repo / folder / file link is downloaded (git clone) and served from this machine - no GitHub Pages needed.
+    Any other link is opened as it is."""
+    m = re.match(r"^https?://(?:www\.)?github\.com/([^/\s]+)/([^/\s#?]+?)(?:\.git)?(?:/(?:tree|blob)/([^/\s]+)/?([^\s?#]*))?/?(?:[?#].*)?$", url)
+    if not m:
+        return url
+    user, repo, branch, sub = m.group(1), m.group(2), m.group(3), (m.group(4) or "").strip("/")
+    dest = os.path.join(tmp, f"devrepo_{user}_{repo}")
+    if not os.path.isdir(dest):
+        cmd = ["git", "clone", "--depth", "1"] + (["--branch", branch] if branch else []) + [f"https://github.com/{user}/{repo}.git", dest]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        if r.returncode != 0 and branch:                       # the branch name may have contained a slash: try the default branch
+            shutil.rmtree(dest, ignore_errors=True)
+            r = subprocess.run(["git", "clone", "--depth", "1", f"https://github.com/{user}/{repo}.git", dest], capture_output=True, text=True, timeout=180)
+        if r.returncode != 0:
+            raise RuntimeError("could not download the repo: " + (r.stderr or "")[-200:])
+    port = _dev_serve(dest)
+    path = sub
+    full = os.path.join(dest, path)
+    if os.path.isdir(full) or not path:
+        idx = None
+        for name in ("index.html", "index.htm"):
+            if os.path.exists(os.path.join(full, name)):
+                idx = name
+                break
+        if idx is None:
+            for root, _d, files in os.walk(full):
+                hs = sorted(f for f in files if f.lower().endswith((".html", ".htm")))
+                if hs:
+                    idx = os.path.relpath(os.path.join(root, hs[0]), full)
+                    break
+        if idx is None:
+            raise RuntimeError("the repo has no .html page")
+        path = (path + "/" + idx).strip("/")
+    return f"http://127.0.0.1:{port}/{path}"
+
+
+def _dev_page(url, tmp, W, H):
+    if _DEV["dead"]:
+        raise RuntimeError("browser not available")
+    if _DEV["page"] is None or _DEV["size"] != (W, H):
+        try:
+            from playwright.sync_api import sync_playwright
+            if _DEV["pw"] is None:
+                _DEV["pw"] = sync_playwright().start()
+                _DEV["browser"] = _DEV["pw"].chromium.launch(args=["--no-sandbox", "--disable-gpu"])
+            _DEV["ctx"] = _DEV["browser"].new_context(viewport={"width": W, "height": H}, device_scale_factor=1, locale="en-US",
+                                                      user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+            _DEV["page"] = _DEV["ctx"].new_page()
+            _DEV["size"], _DEV["url"] = (W, H), None
+        except Exception as e:
+            _DEV["dead"] = True
+            raise RuntimeError(f"playwright is not installed or the browser did not start ({e})")
+    page = _DEV["page"]
+    if _DEV["url"] != url:                     # the same link in the next scene keeps the page as it is (what was typed and clicked stays)
+        real = _dev_real_url(url, tmp)
+        page.goto(real, wait_until="domcontentloaded", timeout=40000)
+        try:
+            page.wait_for_load_state("load", timeout=9000)
+        except Exception:
+            pass                                   # slow trackers: the page is already there
+        page.wait_for_timeout(900)
+        _dev_clean_page(page)
+        _DEV["url"] = url
+    return page
+
+
+def _dev_clean_page(page):
+    """Closes cookie banners / pop-ups of other people's websites, and refuses block pages (then the scene keeps its picture)."""
+    try:
+        for name in ("Accept all", "Accept All", "Accept", "I agree", "Agree", "Got it", "Allow all", "OK", "Okay", "Close", "No thanks", "Dismiss"):
+            b = page.get_by_role("button", name=name, exact=True)
+            if b.count() and b.first.is_visible():
+                b.first.click(timeout=1500)
+                page.wait_for_timeout(300)
+                break
+    except Exception:
+        pass
+    try:
+        head = (page.inner_text("body", timeout=3000) or "")[:1200].lower()
+        if re.search(r"just a moment|verify you are human|access denied|attention required|enable javascript and cookies|are you a robot", head):
+            raise RuntimeError("the site blocked the browser")
+    except RuntimeError:
+        raise
+    except Exception:
+        pass
+
+
+def _dev_close():
+    try:
+        if _DEV["browser"]:
+            _DEV["browser"].close()
+        if _DEV["pw"]:
+            _DEV["pw"].stop()
+    except Exception:
+        pass
+
+
+def _dev_find(page, target, want_input=False):
+    t = (target or "").strip()
+    if not t:
+        return None
+    cands = []
+    if re.match(r"^(?:#|\.|\[|css=|xpath=|//)", t) or re.search(r"\s>\s|\[[a-z\-]+[=~^$*|]", t):
+        cands.append(page.locator(t))
+    else:
+        if want_input:
+            cands += [page.get_by_label(t), page.get_by_placeholder(t), page.get_by_role("textbox", name=t), page.get_by_role("combobox", name=t)]
+        cands += [page.get_by_role("button", name=t), page.get_by_role("link", name=t), page.get_by_role("tab", name=t),
+                  page.get_by_label(t), page.get_by_placeholder(t), page.get_by_text(t, exact=True), page.get_by_text(t), page.get_by_role("radio", name=t),
+                  page.get_by_role("checkbox", name=t), page.locator(f"[title*='{t[:40]}' i], [aria-label*='{t[:40]}' i], [value*='{t[:40]}' i]")]
+    for c in cands:
+        try:
+            n = min(c.count(), 6)
+            for i in range(n):
+                e = c.nth(i)
+                if e.is_visible():
+                    return e
+        except Exception:
+            continue
+    return None
+
+
+def _dev_center(el, W, H):
+    el.scroll_into_view_if_needed(timeout=2500)
+    bb = el.bounding_box()
+    if not bb:
+        return None
+    return (min(max(bb["x"] + bb["width"] / 2.0, 4), W - 4), min(max(bb["y"] + bb["height"] / 2.0, 4), H - 4))
+
+
+def _dev_est(steps):
+    tot = DEV_START_DELAY
+    for s in steps:
+        k = s["do"]
+        tot += {"click": 1.5, "hover": 1.1, "scroll": 1.4, "zoom": 0.3, "key": 0.5}.get(k, 0.0)
+        if k == "type":
+            tot += 1.3 + 0.07 * len(s["text"])
+        if k == "wait":
+            tot += s["seconds"]
+        tot += DEV_GAP
+    return tot
+
+
+def dev_scene_frames(dev, duration, td, W, H, fps, tmp):
+    """Yields one BGR frame per video frame: the live page with the cursor on top. Raises before the first frame if the page cannot be opened."""
+    page = _dev_page(dev["url"], tmp, W, H)
+    steps = parse_dev_steps(dev.get("steps", ""))
+    avail = max(duration - (td + 0.3 if td else 0.35), 1.0)
+    sp = 1.0
+    est = _dev_est(steps)
+    if steps and est > avail:
+        sp = max(avail / est, 0.45)                    # long list of steps: everything moves faster so it all fits in the voice
+    u = min(W, H) / 1080.0
+    cur = [(0.66, 0.80)]
+    cursor = None
+    if steps:
+        cursor = _OvCursor([{"t0": 0.0, "t1": 0.0, "a": cur[0], "b": cur[0], "click": None, "double": False}], W, H, u, duration)
+        cursor.t0 = 0.0
+    now = [0.0]
+
+    def glide(tgt, base=0.75):
+        d = math.hypot(tgt[0] - cur[0][0], tgt[1] - cur[0][1])
+        dur = (0.4 + min(d, 1.2) * base) * sp
+        t0 = now[0]
+        cursor.steps.append({"t0": t0, "t1": t0 + dur, "a": cur[0], "b": tgt, "click": None, "double": False})
+        cur[0] = tgt
+        return t0 + dur
+
+    def wait_until(t):
+        while now[0] < t:
+            yield
+
+    def do_click(s):
+        el = _dev_find(page, s["target"])
+        c = _dev_center(el, W, H) if el else None
+        if not c:
+            print(f"::warning::developer screen: could not find '{s['target']}' to click")
+            return
+        t_arr = glide((c[0] / W, c[1] / H))
+        yield from wait_until(t_arr + 0.08)
+        cursor.steps[-1]["click"] = now[0]
+        cursor.steps[-1]["double"] = bool(s.get("double"))
+        page.mouse.move(c[0], c[1])
+        if s.get("double"):
+            page.mouse.dblclick(c[0], c[1])
+        else:
+            page.mouse.click(c[0], c[1])
+        yield from wait_until(now[0] + 0.55 * sp)
+
+    def do_hover(s):
+        el = _dev_find(page, s["target"])
+        c = _dev_center(el, W, H) if el else None
+        if not c:
+            print(f"::warning::developer screen: could not find '{s['target']}' to point at")
+            return
+        t_arr = glide((c[0] / W, c[1] / H))
+        yield from wait_until(t_arr)
+        page.mouse.move(c[0], c[1])
+        yield from wait_until(now[0] + 0.5 * sp)
+
+    def do_type(s):
+        el = _dev_find(page, s["target"], want_input=True) if s.get("target") else None
+        if el is None:
+            try:
+                el = page.locator("input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=button]):not([type=submit]), textarea, [contenteditable=true]").first
+                if not el.is_visible():
+                    el = None
+            except Exception:
+                el = None
+        if el is None:
+            print(f"::warning::developer screen: no place to type '{s['text'][:20]}'")
+            return
+        c = _dev_center(el, W, H)
+        if not c:
+            return
+        t_arr = glide((c[0] / W, c[1] / H))
+        yield from wait_until(t_arr + 0.08)
+        cursor.steps[-1]["click"] = now[0]
+        page.mouse.click(c[0], c[1])
+        try:
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Backspace")
+        except Exception:
+            pass
+        text, t0, per = s["text"], now[0] + 0.25 * sp, 0.07 * sp
+        done = 0
+        while done < len(text):
+            n = min(len(text), int(max(now[0] - t0, 0) / per))
+            if n > done:
+                page.keyboard.type(text[done:n])
+                done = n
+            yield
+        yield from wait_until(now[0] + 0.35 * sp)
+
+    def do_scroll(s):
+        try:
+            y0 = page.evaluate("window.scrollY")
+            if s.get("to"):
+                el = _dev_find(page, s["to"])
+                if not el:
+                    print(f"::warning::developer screen: could not find '{s['to']}' to scroll to")
+                    return
+                bb = el.bounding_box()
+                y1 = y0 + bb["y"] - H * 0.3
+            elif s.get("full"):
+                y1 = 0 if s.get("dir") == "up" else page.evaluate("document.documentElement.scrollHeight")
+            else:
+                amt = s.get("amount") or int(H * 0.6)
+                y1 = y0 + (-amt if s.get("dir") == "up" else amt)
+        except Exception:
+            return
+        t0, dur = now[0], 1.0 * sp
+        last = y0
+        while now[0] < t0 + dur:
+            p = (now[0] - t0) / dur
+            y = y0 + (y1 - y0) * (p * p * (3 - 2 * p))
+            page.evaluate("d => window.scrollBy(0, d)", y - last)
+            last = y
+            yield
+        page.evaluate("d => window.scrollBy(0, d)", y1 - last)
+        yield from wait_until(now[0] + 0.3 * sp)
+
+    def do_wait(s):
+        yield from wait_until(now[0] + s["seconds"])
+
+    def do_zoom(s):
+        page.evaluate("p => { document.body.style.zoom = p + '%'; }", s["pct"])
+        yield from wait_until(now[0] + 0.3)
+
+    def do_key(s):
+        page.keyboard.press(s["key"])
+        yield from wait_until(now[0] + 0.4 * sp)
+
+    table = {"click": do_click, "hover": do_hover, "type": do_type, "scroll": do_scroll, "wait": do_wait, "zoom": do_zoom, "key": do_key}
+    N = max(int(round(duration * fps)), 2)
+    idx, gen, next_start, last = 0, None, DEV_START_DELAY, None
+
+    def shot():
+        raw = page.screenshot(type="jpeg", quality=88)
+        img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            return None
+        if img.shape[1] != W or img.shape[0] != H:
+            img = cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA)
+        return img
+
+    for k in range(N):
+        now[0] = k / float(fps)
+        try:
+            if gen is None and idx < len(steps) and now[0] >= next_start:
+                gen = table[steps[idx]["do"]](steps[idx])
+                idx += 1
+            if gen is not None:
+                try:
+                    next(gen)
+                except StopIteration:
+                    gen = None
+                    next_start = now[0] + DEV_GAP * sp
+        except Exception as e:
+            print(f"::warning::developer screen step skipped ({str(e)[:120]})")
+            gen = None
+            next_start = now[0] + DEV_GAP
+        try:
+            if last is None or k % DEV_CAPTURE_EVERY == 0:
+                s_ = shot()
+                if s_ is not None:
+                    last = s_
+        except Exception as e:
+            if last is None:
+                raise RuntimeError(f"the page could not be captured ({e})")
+        frame = last.copy()
+        if cursor is not None and len(cursor.steps) > 1:
+            cursor.draw(frame, now[0])
+        yield frame
+
+
+import atexit
+atexit.register(_dev_close)
+
+
+def _peek_first(gen):
+    """Start the page generator now, so a page that cannot open fails here (and the scene falls back to its picture)."""
+    first = next(gen)
+    def _again():
+        yield first
+        yield from gen
+    return _again()
+
+
 def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, segment_path,
                          plan, next_image=None, next_plan=None, is_first=False, is_last=False):
     """One scene with the 2.5D camera. The last frames melt into the first picture of the next scene (when there is one)."""
-    st = cin_state(scene_index, image_path, tmp)
-    nst = cin_state(scene_index + 1, next_image, tmp) if next_image and next_plan and plan.get("kind") != "cut" else None
+    st = cin_state(scene_index, image_path, tmp, static=bool(plan.get("static")))
+    nst = cin_state(scene_index + 1, next_image, tmp, static=bool(next_plan.get("static"))) if next_image and next_plan and plan.get("kind") != "cut" else None
     N = max(int(round(duration * FPS)), 2)
     td = min(CINEMA_TRANSITION_SECONDS, duration * 0.4) if nst is not None else 0.0
     TN = int(round(td * FPS))
@@ -1745,7 +2810,7 @@ def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text
     tools = cin_finish_tools(WIDTH, HEIGHT)
     B0 = None
     if nst is not None:
-        B0 = cin_render(nst, cin_pose_at(next_plan["moves"], next_plan["strength"], 0.0))
+        B0 = cin_render(nst, cin_pose_plan(next_plan, 0.0))
     audio_in = audio_path
     if nst is not None and CINEMA_WHOOSH:
         audio_in = _whoosh_audio(audio_path, duration, td, plan["kind"], tmp, f"s{scene_index:03d}")
@@ -1779,6 +2844,24 @@ def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text
             print(f"::warning::end title skipped ({e})")
             endt = None
 
+    devgen = None
+    if plan.get("dev"):
+        try:
+            devgen = dev_scene_frames(plan["dev"], duration, td, WIDTH, HEIGHT, FPS, tmp)
+            devgen = _peek_first(devgen)
+            print(f"scene {scene_index}: live developer screen {plan['dev']['url']}")
+        except Exception as e:
+            print(f"::warning::scene {scene_index}: developer screen not used ({str(e)[:160]}) - the scene keeps its picture")
+            devgen = None
+    ov = None
+    if plan.get("overlays"):
+        try:
+            ov = _Overlay(plan["overlays"], WIDTH, HEIGHT, duration, td)
+            print(f"scene {scene_index}: {len(ov.items)} on-screen items (labels/animations)")
+        except Exception as e:
+            print(f"::warning::labels/animations skipped ({e})")
+            ov = None
+
     fade_out_start = max(duration - FADE_SECONDS, 0)
     vf_parts = []
     vf_parts += subtitle_filters(sub_text, duration, tmp, f"s{scene_index:03d}")
@@ -1800,7 +2883,7 @@ def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text
         try:
             for k in range(N):
                 t = k / float(N - 1)
-                pose = cin_pose_at(plan["moves"], plan["strength"], t)
+                pose = cin_pose_plan(plan, t)
                 if TN and k >= N - TN:
                     p = (k - (N - TN) + 1) / float(TN)
                     rl = CINEMA_LEADIN_RELAX + (CINEMA_TRANSITION_RELAX - CINEMA_LEADIN_RELAX) * _ease(p)
@@ -1814,10 +2897,20 @@ def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text
                     pose = dict(pose)
                     for _key in ("tx", "ty", "dz"):
                         pose[_key] *= (1.0 - rl)
-                frame = cin_render(st, pose)
+                frame = None
+                if devgen is not None:
+                    try:
+                        frame = next(devgen)
+                    except Exception as e:
+                        print(f"::warning::scene {scene_index}: developer screen stopped ({str(e)[:140]}) - the rest of the scene keeps the picture")
+                        devgen = None
+                if frame is None:
+                    frame = cin_render(st, pose)
                 if TN and k >= N - TN:
                     frame = tfun(frame, B0, p, plan["dir"])
-                frame = cin_finish(frame, tools, k)
+                frame = cin_finish(frame, tools, k, clean=bool(plan.get("static")))
+                if ov is not None:
+                    frame = ov.draw(np.ascontiguousarray(frame), k / float(FPS))
                 if lab is not None and lab_t0 <= k / float(FPS) < lab_t0 + lab.T:
                     frame = lab.draw(np.ascontiguousarray(frame), k / float(FPS) - lab_t0)
                 if endt is not None and k / float(FPS) >= endt_t0:
@@ -1838,7 +2931,7 @@ def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text
         rc = proc.wait()
     if rc != 0:
         raise RuntimeError("cinema ffmpeg failed: " + open(log_path).read()[-400:])
-    print(f"scene {scene_index}: camera {'+'.join(plan['moves'])}" + (f", transition {plan['kind']} ({plan['dir']})" if nst is not None else (", hard cut (no transition)" if plan.get("kind") == "cut" else ", ends with a fade")))
+    print(f"scene {scene_index}: camera {'NONE (still)' if plan.get('static') else '+'.join(plan['moves'])}" + (f", transition {plan['kind']} ({plan['dir']})" if nst is not None else (", hard cut (no transition)" if plan.get("kind") == "cut" else ", ends with a fade")))
 
 
 def build_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, segment_path):
