@@ -1775,7 +1775,8 @@ def _subscribe_audio(audio_path, t_click, duration, tmp, tag):
 # Where: top / upper / middle / lower / bottom + left / center / right  (or 70%,30%).  Styles: tag, title, lower third, box, highlight, arrow, circle, underline.
 # Several LABEL / ANIMATION lines in one scene are allowed. The words are drawn by the video builder, so they are always sharp and exactly as written.
 OVERLAYS = True
-OVERLAY_ACCENT = (0, 196, 255)        # B, G, R of the accent colour (a warm yellow-orange)
+OVERLAY_ACCENT = (0, 196, 255)
+OVERLAY_TEXT_BOOST = 1.45        # on-screen words (typed text, arrows, pop-ins, labels) are this much bigger: easy to read in a lesson video        # B, G, R of the accent colour (a warm yellow-orange)
 CINEMA_STATIC_CLEAN = True            # NO CAMERA scenes: no vignette and no film grain, so small screen text stays clear
 
 _ANIM_VERBS = r"cursor|mouse|pointer|click|clicks|clicking|type|types|typing|type-on|pop|pop-in|appear|appears|highlight|highlights|scroll|scrolls|scrolling|arrow|reveal|underline|draw"
@@ -2269,7 +2270,7 @@ class _OvCursor(_OvItem):
 class _Overlay:
     def __init__(self, spec, W, H, duration, td):
         self.W, self.H = W, H
-        u = min(W, H) / 1080.0
+        u = min(W, H) / 1080.0 * OVERLAY_TEXT_BOOST
         avail = max(duration - (td + 0.12 if td else 0.25), 0.8)
         self.items = []
         # --- script labels: fixed words placed on the picture
