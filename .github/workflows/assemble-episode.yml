@@ -65,6 +65,14 @@ jobs:
       - name: Install Python dependencies
         run: pip install requests numpy opencv-python-headless onnxruntime pillow
 
+      # NEW (v83): the browser for live developer screens. It is installed ONLY when a scene has a SCREEN link, so normal videos cost nothing extra.
+      - name: Install browser for live screens (only if a scene needs it)
+        if: contains(inputs.manifest, 'screen_url')
+        continue-on-error: true
+        run: |
+          pip install playwright
+          timeout 400 python -m playwright install --with-deps chromium || echo "WARNING: browser did not install - live screens will use their pictures instead"
+
       - name: Assemble the episode
         env:
           MANIFEST_JSON: ${{ inputs.manifest }}
