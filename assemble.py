@@ -1776,11 +1776,12 @@ def _subscribe_audio(audio_path, t_click, duration, tmp, tag):
 # Several LABEL / ANIMATION lines in one scene are allowed. The words are drawn by the video builder, so they are always sharp and exactly as written.
 OVERLAYS = True
 OVERLAY_ACCENT = (0, 196, 255)
+OVERLAY_HOLD = 5.0   # v85: a pop-in / highlight / typed note leaves after about this many seconds, so words never pile up
 WORD_SYNC = True   # v85: words/labels/spotlights appear exactly when the voice says their word
 OVERLAY_TEXT_BOOST = 1.45        # on-screen words (typed text, arrows, pop-ins, labels) are this much bigger: easy to read in a lesson video        # B, G, R of the accent colour (a warm yellow-orange)
 CINEMA_STATIC_CLEAN = True            # NO CAMERA scenes: no vignette and no film grain, so small screen text stays clear
 
-_ANIM_VERBS = r"spotlight|spot|focus|scale|stagger|split|slide|fade|label|cursor|mouse|pointer|click|clicks|clicking|type|types|typing|type-on|pop|pop-in|appear|appears|highlight|highlights|scroll|scrolls|scrolling|arrow|reveal|underline|draw"
+_ANIM_VERBS = r"pulse|flow|spotlight|spot|focus|scale|stagger|split|slide|fade|label|cursor|mouse|pointer|click|clicks|clicking|type|types|typing|type-on|pop|pop-in|appear|appears|highlight|highlights|scroll|scrolls|scrolling|arrow|reveal|underline|draw"
 
 
 def _ov_clean(s, n=120):
@@ -1920,6 +1921,16 @@ def parse_overlays(scene):
                 quoted = re.search(r"[\"“](.+?)[\"”]", act) or re.search(r"'([^']{2,})'", act)
                 qtext = _ov_clean(quoted.group(1), 90) if quoted else ""
                 pos = _ov_pos(re.sub(r"[\"“].+?[\"”]", " ", act))
+                if re.match(r"(?i)^pulse\b", act):
+                    if pos:
+                        anims.append({"kind": "pulse", "text": qtext, "pos": pos})
+                    continue
+                if re.match(r"(?i)^flow\b", act):
+                    pts_ = re.findall(r"(\d{1,3}(?:\.\d+)?)\s*%\s*[, /]\s*(\d{1,3}(?:\.\d+)?)\s*%", act)
+                    if len(pts_) >= 2:
+                        cv_ = lambda q: (min(max(float(q[0]) / 100.0, 0.03), 0.97), min(max(float(q[1]) / 100.0, 0.03), 0.97))
+                        anims.append({"kind": "flow", "text": qtext, "a": cv_(pts_[0]), "b": cv_(pts_[1])})
+                    continue
                 if re.match(r"(?i)^(?:spotlight|spot|focus)\b", act):
                     # v85: spotlight "HIPPOCAMPUS" at 60%,40%  -> everything dims except that spot, a label names it, timed to the spoken word
                     if pos:
@@ -2133,8 +2144,23 @@ class _OvArrow(_OvItem):
 class _OvType(_OvItem):
     """A text field where the words are typed one letter at a time."""
 
+    def set_mark_times(self, words):
+        for mk in self.marks:
+            wt = _word_time_for(words, mk[2]) if words else None
+            if wt is not None:
+                mk[3] = max(wt - 0.05, self.t0)
+
     def __init__(self, text, pos, W, H, u, t0, t1, tdur):
         from PIL import Image, ImageDraw
+        # v85: *word* inside the text = that word gets a gold marker when the voice says it
+        self.marks, plain, last = [], "", 0
+        for m_ in re.finditer(r"\*([^*]+)\*", text):
+            plain += text[last:m_.start()]
+            self.marks.append([len(plain), len(plain) + len(m_.group(1)), m_.group(1), None])
+            plain += m_.group(1)
+            last = m_.end()
+        plain += text[last:]
+        text = plain if self.marks else text.replace("*", "")
         self.text, self.pos, self.W, self.H, self.u, self.t0, self.t1, self.tdur = text, pos, W, H, u, t0, t1, max(tdur, 0.3)
         self.f = _ov_font(40 * u)
         probe = ImageDraw.Draw(Image.new("RGBA", (4, 4)))
@@ -2156,6 +2182,14 @@ class _OvType(_OvItem):
         d.rounded_rectangle([2 * S, 2 * S, (self.w - 2) * S, (self.h - 2) * S], radius=int(14 * self.u * S), fill=(255, 255, 255, 240), outline=(OVERLAY_ACCENT[2], OVERLAY_ACCENT[1], OVERLAY_ACCENT[0], 255), width=3 * S)
         f2 = _ov_font(40 * self.u * S)
         shown = self.text[:n]
+        for mk in self.marks:
+            mt = mk[3] if mk[3] is not None else self.t0 + self.tdur + 0.25
+            if t >= mt and mk[0] < n:
+                e_ = min(mk[1], n)
+                x0 = self.pad * S + int(d.textlength(self.text[:mk[0]], font=f2))
+                x1 = self.pad * S + int(d.textlength(self.text[:e_], font=f2))
+                k_ = min((t - mt) / 0.25, 1.0)
+                d.rounded_rectangle([x0 - 4 * S, int(self.h * S * 0.14), x0 - 4 * S + int((x1 - x0 + 8 * S) * k_), int(self.h * S * 0.86)], radius=6 * S, fill=(255, 214, 0, 255))
         d.text((self.pad * S, int(self.h * S * 0.2)), shown, font=f2, fill=(25, 25, 25, 255))
         if int((t - self.t0) * 2) % 2 == 0 or n < len(self.text):
             cx = self.pad * S + int(d.textlength(shown, font=f2)) + 3 * S
@@ -2299,6 +2333,77 @@ class _OvCursor(_OvItem):
         _ov_blit(frame, self.img, px - self.off * 1.0, py - self.off * 1.0, scale=press, alpha=a, anchor="tl")
 
 
+class _OvPulse(_OvItem):
+    """Rings that spread out from one point, like a beat: it makes a still diagram feel alive."""
+
+    def __init__(self, pos, W, H, u, t0, t1):
+        self.pos, self.W, self.H, self.t0, self.t1 = pos, W, H, t0, t1
+        self.R = int(0.13 * H)
+
+    def draw(self, frame, t):
+        import cv2, numpy as np
+        a = self.fade(t, 0.3, 0.4)
+        if a <= 0.01:
+            return
+        cx, cy = int(self.pos[0] * self.W), int(self.pos[1] * self.H)
+        ov = frame.copy()
+        for k in range(3):
+            ph = ((t - self.t0) / 1.3 - k * 0.33) % 1.0
+            r = int(self.R * (0.12 + 0.88 * ph))
+            al = (1.0 - ph) * 0.9 * a
+            if al <= 0.02:
+                continue
+            tmp = frame.copy()
+            cv2.circle(tmp, (cx, cy), r, (0, 196, 255), max(3, int(self.H * 0.006)), cv2.LINE_AA)
+            cv2.addWeighted(tmp, al, ov, 1 - al, 0, ov)
+        core = 0.5 + 0.5 * np.sin((t - self.t0) * 2 * np.pi / 0.9)
+        tmp = ov.copy()
+        cv2.circle(tmp, (cx, cy), int(self.H * (0.012 + 0.006 * core)), (0, 220, 255), -1, cv2.LINE_AA)
+        cv2.addWeighted(tmp, 0.9 * a, ov, 1 - 0.9 * a, 0, ov)
+        frame[:] = ov
+
+
+class _OvFlow(_OvItem):
+    """Glowing dots travel from one point to another along a soft curve (a signal, blood, information)."""
+
+    def __init__(self, a, b, W, H, u, t0, t1):
+        self.A = (a[0] * W, a[1] * H)
+        self.B = (b[0] * W, b[1] * H)
+        mx, my = (self.A[0] + self.B[0]) / 2, (self.A[1] + self.B[1]) / 2
+        dx, dy = self.B[0] - self.A[0], self.B[1] - self.A[1]
+        self.C = (mx - dy * 0.18, my + dx * 0.18)
+        self.W, self.H, self.t0, self.t1 = W, H, t0, t1
+
+    def _pt(self, s):
+        x = (1 - s) ** 2 * self.A[0] + 2 * (1 - s) * s * self.C[0] + s * s * self.B[0]
+        y = (1 - s) ** 2 * self.A[1] + 2 * (1 - s) * s * self.C[1] + s * s * self.B[1]
+        return int(x), int(y)
+
+    def draw(self, frame, t):
+        import cv2
+        a = self.fade(t, 0.3, 0.4)
+        if a <= 0.01:
+            return
+        ov = frame.copy()
+        pts = [self._pt(i / 40.0) for i in range(41)]
+        for i in range(40):
+            cv2.line(ov, pts[i], pts[i + 1], (255, 220, 120), max(2, int(self.H * 0.004)), cv2.LINE_AA)
+        cv2.addWeighted(ov, 0.35 * a, frame, 1 - 0.35 * a, 0, ov)
+        for k in range(6):
+            s = (((t - self.t0) * 0.42) + k / 6.0) % 1.0
+            for tr in range(5):
+                s2 = s - tr * 0.012
+                if s2 < 0:
+                    continue
+                px, py = self._pt(s2)
+                rad = max(2, int(self.H * (0.011 - tr * 0.0017)))
+                tmp = ov.copy()
+                cv2.circle(tmp, (px, py), rad, (0, 220, 255), -1, cv2.LINE_AA)
+                al = (1.0 - tr * 0.2) * a
+                cv2.addWeighted(tmp, al, ov, 1 - al, 0, ov)
+        frame[:] = ov
+
+
 class _OvSpot(_OvItem):
     """Everything dims except one round spot with a gold ring."""
 
@@ -2421,6 +2526,9 @@ class _Overlay:
             elif k == "spot":
                 plan.append(("spot", an, tc, 0.5, None, None))
                 tc += 1.2
+            elif k in ("pulse", "flow"):
+                plan.append((k, an, tc, 0.5, None, None))
+                tc += 0.8
             elif k == "scroll":
                 plan.append(("scroll", an, 0.35, 0.0, None, None))
         f = 1.0
@@ -2430,10 +2538,18 @@ class _Overlay:
         cur_steps = []
         words = spec.get("words") or []
         spots = []
+        _slots = [(0.5, 0.66), (0.5, 0.78), (0.5, 0.90)]      # v85: a pop-in / highlight with no written position goes to the next free row, never on top of another
+        _slot_i = [0]
+        def _auto(an_):
+            if an_.get("pos"):
+                return an_["pos"]
+            p_ = _slots[_slot_i[0] % len(_slots)]
+            _slot_i[0] += 1
+            return p_
         for (k, an, t0, dur, a, b) in plan:
             t0 = sc(t0) if k != "scroll" else t0
             dur = dur * f
-            if words and k in ("type", "pop", "highlight", "spot") and an.get("text"):
+            if words and k in ("type", "pop", "highlight", "spot", "pulse", "flow") and an.get("text"):
                 wt = _word_time_for(words, an["text"])      # v85: appears exactly when the voice says its word
                 if wt is not None:
                     t0 = min(max(wt - 0.12, 0.2), max(avail - 0.8, 0.3))
@@ -2446,16 +2562,22 @@ class _Overlay:
                 elif an.get("click"):
                     cur_steps.append({"t0": t0, "t1": t0, "a": a, "b": b, "click": t0 + 0.1, "double": an.get("double", False)})
             elif k == "type":
-                self.items.append(_OvType(an["text"], an.get("pos") or (0.5, 0.5), W, H, u, t0, avail, dur))
+                _it = _OvType(an["text"], an.get("pos") or (0.5, 0.5), W, H, u, t0, min(avail, t0 + dur + OVERLAY_HOLD + 1.5), dur)
+                _it.set_mark_times(words)
+                self.items.append(_it)
             elif k == "pop":
                 if an.get("text"):
-                    self.items.append(_OvTag(an["text"], an.get("pos") or (0.5, 0.5), W, H, u, t0, avail))
+                    self.items.append(_OvTag(an["text"], _auto(an), W, H, u, t0, min(avail, t0 + OVERLAY_HOLD)))
             elif k == "highlight":
-                self._add_label(an.get("style", "highlight"), an.get("text", ""), an.get("pos") or (0.5, 0.5), u, t0, avail)
+                self._add_label(an.get("style", "highlight"), an.get("text", ""), _auto(an), u, t0, min(avail, t0 + OVERLAY_HOLD))
             elif k == "scroll":
                 self.items.append(_OvScroll(an["text"], W, H, u, t0, avail))
             elif k == "spot":
                 spots.append((t0, an))
+            elif k == "pulse":
+                self.items.append(_OvPulse(an.get("pos") or (0.5, 0.5), W, H, u, t0, min(t0 + 4.5, avail)))
+            elif k == "flow":
+                self.items.append(_OvFlow(an["a"], an["b"], W, H, u, t0, min(t0 + 6.0, avail)))
         spots.sort(key=lambda x: x[0])
         for si, (t0_, an_) in enumerate(spots):
             t1_ = min((spots[si + 1][0] + 0.2) if si + 1 < len(spots) else avail, t0_ + 5.0, avail)   # a spotlight stays about 5 s at most
@@ -2466,6 +2588,61 @@ class _Overlay:
         if cur_steps:
             self.items.append(_OvCursor(cur_steps, W, H, u, avail))
         self.items.sort(key=lambda i: (isinstance(i, _OvCursor), i.t0))
+        try:
+            self._resolve()
+        except Exception as e:
+            print(f"::warning::overlap check skipped ({str(e)[:100]})")
+
+    def _resolve(self):
+        """v85: words that are on screen at the same time never touch: a note that would overlap another is moved to the nearest free place."""
+        import numpy as np
+        W, H = self.W, self.H
+        movable = (_OvTag, _OvType, _OvBox, _OvLower)
+        fixed = (_OvTitle, _OvArrow)
+        its = [i for i in self.items if isinstance(i, movable + fixed)]
+        its.sort(key=lambda i: (0 if isinstance(i, fixed) else 1, i.t0))
+        placed = []
+
+        def mk(it):
+            tm = max(min(it.t0 + getattr(it, "tdur", 0.0) + 0.5, it.t1 - 0.05), it.t0 + 0.35)
+            f = np.zeros((H // 3, W // 3, 3), np.uint8) if False else np.zeros((H, W, 3), np.uint8)
+            it.draw(f, tm)
+            return (f.sum(2) > 0)[::3, ::3]
+
+        def clash(it, m):
+            ys, xs = np.where(m)
+            if len(xs) and (xs.min() <= 1 or xs.max() >= m.shape[1] - 2 or ys.min() <= 1 or ys.max() >= m.shape[0] - 2):
+                return True
+            for o, om in placed:
+                if o.t0 < it.t1 and it.t0 < o.t1 and (m & om).sum() > 2:
+                    return True
+            return False
+
+        moved = 0
+        for it in its:
+            m = mk(it)
+            if isinstance(it, movable) and clash(it, m):
+                x0, y0 = it.pos
+                done = False
+                for dy in (0.12, -0.12, 0.24, -0.24, 0.36, -0.36, 0.48, -0.48):
+                    for dx in (0, 0.22, -0.22, 0.38, -0.38):
+                        nx, ny = x0 + dx, y0 + dy
+                        if not (0.1 <= nx <= 0.9 and 0.08 <= ny <= 0.93):
+                            continue
+                        it.pos = (nx, ny)
+                        m2 = mk(it)
+                        if not clash(it, m2):
+                            m, done = m2, True
+                            moved += 1
+                            break
+                    if done:
+                        break
+                if not done:
+                    it.pos = (x0, y0)
+                    m = mk(it)
+            placed.append((it, m))
+        if moved:
+            print(f"overlap check: {moved} note(s) moved to a free place")
 
     def _add_label(self, st, text, pos, u, t0, t1):
         W, H = self.W, self.H
