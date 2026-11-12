@@ -73,6 +73,15 @@ jobs:
           pip install playwright
           timeout 400 python -m playwright install --with-deps chromium || echo "WARNING: browser did not install - live screens will use their pictures instead"
 
+      # NEW (v85): exact word timing, so labels, pops and spotlights appear when the voice says the word. Only for scenes with animations.
+      # If it does not install, the builder falls back to estimated timing and the video still builds.
+      - name: Install word timing (only if a scene has animations)
+        if: contains(inputs.manifest, 'overlay_anims')
+        continue-on-error: true
+        run: |
+          timeout 300 pip install faster-whisper || echo "WARNING: word timing did not install - estimated timing will be used"
+          timeout 200 python -c "from faster_whisper import WhisperModel; WhisperModel('tiny.en', device='cpu', compute_type='int8')" || echo "WARNING: word-timing model not downloaded"
+
       - name: Assemble the episode
         env:
           MANIFEST_JSON: ${{ inputs.manifest }}
