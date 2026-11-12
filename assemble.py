@@ -1779,7 +1779,7 @@ OVERLAY_ACCENT = (0, 196, 255)
 OVERLAY_TEXT_BOOST = 1.45        # on-screen words (typed text, arrows, pop-ins, labels) are this much bigger: easy to read in a lesson video        # B, G, R of the accent colour (a warm yellow-orange)
 CINEMA_STATIC_CLEAN = True            # NO CAMERA scenes: no vignette and no film grain, so small screen text stays clear
 
-_ANIM_VERBS = r"cursor|mouse|pointer|click|clicks|clicking|type|types|typing|type-on|pop|pop-in|appear|appears|highlight|highlights|scroll|scrolls|scrolling|arrow|reveal|underline|draw"
+_ANIM_VERBS = r"scale|stagger|split|slide|fade|label|cursor|mouse|pointer|click|clicks|clicking|type|types|typing|type-on|pop|pop-in|appear|appears|highlight|highlights|scroll|scrolls|scrolling|arrow|reveal|underline|draw"
 
 
 def _ov_clean(s, n=120):
@@ -1892,6 +1892,30 @@ def parse_overlays(scene):
                 if not act or not re.search(r"(?i)\b(?:" + _ANIM_VERBS + r")\b", act):
                     continue
                 low = act.lower()
+                # v85: words many lesson scripts use: scale / stagger / split / slide / fade in / label "TEXT"  -> shown as pop-in words
+                if re.match(r"(?i)^(?:scale|stagger|split(?:\s+screen)?|slide|fade(?:\s+in)?|fade\s+into|label|zoom)\b", act):
+                    qs_ = [_ov_clean(x, 90) for x in re.findall(r"[\"\u201c]([^\"\u201d]{1,90})[\"\u201d]", act)]
+                    qs_ = [x for x in qs_ if x]
+                    if re.match(r"(?i)^scale\b", act) and qs_:
+                        norm = lambda t: re.sub(r"[^a-z0-9]+", "", t.lower())
+                        if any(norm(qs_[0]) and (norm(qs_[0]) in norm(l["text"]) or norm(l["text"]) in norm(qs_[0])) for l in labels):
+                            continue          # the LABEL line already shows this title
+                        anims.append({"kind": "pop", "text": qs_[0], "pos": (0.5, 0.12)})
+                        continue
+                    n_ = len(qs_)
+                    if n_ == 0:
+                        continue
+                    if re.match(r"(?i)^split", act) and n_ >= 2:
+                        pts = [(0.27, 0.80), (0.73, 0.80)]
+                    elif n_ == 1:
+                        pts = [(0.5, 0.80)]
+                    elif n_ <= 3:
+                        pts = [((k + 1) / (n_ + 1), 0.80) for k in range(n_)]
+                    else:
+                        pts = [((k + 1) / (n_ + 1), 0.74 if k % 2 == 0 else 0.86) for k in range(n_)]
+                    for k, t_ in enumerate(qs_[:6]):
+                        anims.append({"kind": "pop", "text": t_, "pos": pts[min(k, len(pts) - 1)]})
+                    continue
                 quoted = re.search(r"[\"“](.+?)[\"”]", act) or re.search(r"'([^']{2,})'", act)
                 qtext = _ov_clean(quoted.group(1), 90) if quoted else ""
                 pos = _ov_pos(re.sub(r"[\"“].+?[\"”]", " ", act))
@@ -1907,6 +1931,8 @@ def parse_overlays(scene):
                         qtext = _ov_clean(re.sub(r"(?i)^(?:pop-in|pop|appears?|reveal)\s*(?:up)?\s*", "", re.sub(r"(?i)\b(?:at|in)\s+(?:the\s+)?(?:top|bottom|upper|lower|middle|center|centre|left|right).*$", "", act)), 90)
                     anims.append({"kind": "pop", "text": qtext, "pos": pos})
                 elif re.match(r"(?i)^(?:highlight|underline|arrow|draw)", act):
+                    if not qtext and not pos and not re.match(r"(?i)^arrow", act):
+                        continue          # v85: "draw neural signals..." / "highlight each term" has nothing the builder can point at: it is skipped, not drawn as an empty box
                     anims.append({"kind": "highlight", "text": qtext, "pos": pos, "style": _ov_style(act) or "highlight"})
     if not labels and not anims:
         return None
