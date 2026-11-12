@@ -2024,7 +2024,7 @@ class _OvTitle(_OvItem):
         self.pos, self.W, self.H, self.t0, self.t1 = pos, W, H, t0, t1
         size = 92 * u
         while size > 24 * u:
-            img = _ov_text_rgba(text, size, fill=(255, 255, 255))
+            img = _ov_text_rgba(text, size, fill=(255, 255, 255), bg=(34, 16, 6, 225), padx=34 * u, pady=14 * u, radius=18 * u, border=(0, 196, 255, 255))   # v85: dark bar + thin gold outline behind every title
             if img.shape[1] <= W * 0.9:
                 break
             size *= 0.9
@@ -3279,6 +3279,112 @@ def build_quiz_segment(scene_index, card, image_path, audio_path, duration, voic
     print(f"scene {scene_index}: quiz card ({phase}) {duration:.1f}s")
 
 
+
+def _click_audio(audio_path, duration, times, tmp, tag):
+    """The voice plus a soft keyboard click for every typed letter."""
+    import numpy as np, wave, random
+    sr = 44100
+    n = int(duration * sr) + sr
+    buf = np.zeros(n, dtype=np.float32)
+    rnd = random.Random(7)
+    for t in times:
+        i0 = int(t * sr)
+        L = int(0.018 * sr)
+        if i0 + L >= n:
+            continue
+        env = np.exp(-np.linspace(0, 7, L))
+        noise = np.array([rnd.uniform(-1, 1) for _ in range(L)], dtype=np.float32)
+        tone = np.sin(np.linspace(0, 2 * np.pi * rnd.choice((1900, 2300, 2700)) * 0.018, L))
+        buf[i0:i0 + L] += (0.55 * noise + 0.45 * tone).astype(np.float32) * env.astype(np.float32) * rnd.uniform(0.7, 1.0) * 0.30
+    pcm = (np.clip(buf, -1, 1) * 32767).astype(np.int16)
+    wav = os.path.join(tmp, f"{tag}_clicks.wav")
+    with wave.open(wav, "wb") as w_:
+        w_.setnchannels(1); w_.setsampwidth(2); w_.setframerate(sr); w_.writeframes(pcm.tobytes())
+    out = os.path.join(tmp, f"{tag}_discaudio.wav")
+    try:
+        run(["ffmpeg", "-y", "-i", audio_path, "-i", wav, "-filter_complex",
+             f"[0:a][1:a]amix=inputs=2:duration=longest:normalize=0,apad,atrim=0:{duration:.3f}[o]", "-map", "[o]", "-ar", "44100", "-ac", "2", out])
+        return out
+    except Exception as e:
+        print(f"::warning::typing sounds skipped ({str(e)[:120]})")
+        return audio_path
+
+
+def build_disclaimer_segment(scene_index, card, image_path, audio_path, duration, voice_len, tmp, segment_path):
+    """v85: the notice is typed on screen letter by letter, with keyboard sounds, while the voice reads it."""
+    from PIL import Image, ImageDraw, ImageFilter
+    W, H = WIDTH, HEIGHT
+    S = (W / 1920.0) if W >= H else (W / 1080.0)
+    text = str(card.get("text") or "").strip()
+    ft = _ov_font(int(66 * S)); fh = _ov_font(int(40 * S))
+    try:
+        bg = Image.open(image_path).convert("RGB")
+        r = max(W / bg.width, H / bg.height)
+        bg = bg.resize((int(bg.width * r) + 1, int(bg.height * r) + 1))
+        bg = bg.crop(((bg.width - W) // 2, (bg.height - H) // 2, (bg.width - W) // 2 + W, (bg.height - H) // 2 + H)).filter(ImageFilter.GaussianBlur(20))
+        bg = Image.blend(bg, Image.new("RGB", (W, H), (8, 14, 34)), 0.82)
+    except Exception:
+        bg = Image.new("RGB", (W, H), (10, 18, 42))
+    base = bg.copy(); d = ImageDraw.Draw(base)
+    pad = int(W * 0.09)
+    head = "IMPORTANT NOTICE"
+    hw = d.textlength(head, font=fh)
+    d.rounded_rectangle((pad, H * 0.3, pad + hw + 44 * S, H * 0.3 + fh.size + 26 * S), radius=int(30 * S), fill=QUIZ_ACCENT)
+    d.text((pad + 22 * S, H * 0.3 + 11 * S), head, font=fh, fill=(20, 20, 30))
+    lines = _quiz_wrap(d, text, ft, W - 2 * pad)
+    pos = []   # (line index, x) of every letter, in typing order
+    total = sum(len(l) for l in lines)
+    y0 = H * 0.3 + fh.size + 26 * S + 60 * S
+    lh = ft.size * 1.35
+    type_dur = max(min(voice_len * 0.9, total / 9.0), 1.5) if total else 1.0
+    t_start = 0.6
+    per = type_dur / max(total, 1)
+    click_times = []
+    k = 0
+    for li, l in enumerate(lines):
+        for ci, ch in enumerate(l):
+            if ch != " ":
+                click_times.append(t_start + k * per)
+            k += 1
+    aud = _click_audio(audio_path, duration, click_times, tmp, f"s{scene_index:03d}")
+    N = max(int(round(duration * FPS)), 2)
+    cmd = ["ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-", "-i", aud,
+           "-vf", f"fade=t=in:st=0:d=0.4,fade=t=out:st={max(duration - 0.4, 0):.3f}:d=0.4,format=yuv420p",
+           "-af", f"afade=t=in:st=0:d=0.05,afade=t=out:st={max(duration - 0.3, 0):.3f}:d=0.3,apad",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", str(VIDEO_CRF), "-maxrate", VIDEO_MAXRATE, "-bufsize", "12M",
+           "-pix_fmt", "yuv420p", "-r", str(FPS), "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", "-t", f"{duration:.3f}", segment_path]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    last_key, last_bytes = None, b""
+    try:
+        for fi in range(N):
+            t = fi / FPS
+            n = int(min(max((t - t_start) / per, 0), total)) if total else 0
+            key = (n, int(t * 2) % 2 if n >= total else 0)
+            if key == last_key:
+                proc.stdin.write(last_bytes); continue
+            im = base.copy(); dd = ImageDraw.Draw(im)
+            left = n; y = y0; lastx = pad; lasty = y0
+            for l in lines:
+                shown = l[:left] if left > 0 else ""
+                left -= len(l)
+                dd.text((pad + 3 * S, y + 3 * S), shown, font=ft, fill=(0, 0, 0))
+                dd.text((pad, y), shown, font=ft, fill=(255, 255, 255))
+                lastx, lasty = pad + dd.textlength(shown, font=ft), y
+                if left <= 0:
+                    break
+                y += lh
+            if n < total or int(t * 2) % 2 == 0:
+                dd.rectangle((lastx + 4 * S, lasty + 4 * S, lastx + 4 * S + 5 * S, lasty + ft.size * 1.15), fill=QUIZ_ACCENT)
+            by = im.tobytes(); proc.stdin.write(by); last_key, last_bytes = key, by
+        proc.stdin.close()
+        if proc.wait() != 0:
+            raise RuntimeError("ffmpeg failed")
+    except Exception:
+        try: proc.kill()
+        except Exception: pass
+        raise
+    print(f"scene {scene_index}: typed notice {duration:.1f}s")
+
 def build_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, segment_path):
     """One scene: composite image + eased zoom + subtitles + fades + audio."""
     composite = os.path.join(tmp, f"composite_{scene_index:03d}.png")
@@ -4035,7 +4141,12 @@ def main():
         if any(isinstance(sc_, dict) and sc_.get("lesson_page") for sc_ in scenes):
             global WATERMARK_TEXT
             WATERMARK_TEXT = ""
-            print("teaching mode (/Developer): watermark off")
+            # v85: teaching mode = the voice must be clear: background music and sound effects are kept very low
+            global SFX_ONCE_REL_DB, SFX_REPEAT_REL_DB, SFX_BED_REL_DB, SFX_MUSIC_REL_DB, SFX_MUSIC_DUCK_RATIO, SFX_DUCK_RATIO, MUSIC_VOLUME
+            SFX_ONCE_REL_DB, SFX_REPEAT_REL_DB, SFX_BED_REL_DB = SFX_ONCE_REL_DB - 4.0, SFX_REPEAT_REL_DB - 4.0, SFX_BED_REL_DB - 4.0   # only about 4 dB lower than a normal video
+            SFX_MUSIC_REL_DB = SFX_MUSIC_REL_DB - 4.0
+            MUSIC_VOLUME = MUSIC_VOLUME * 0.63
+            print("teaching mode (/Developer): watermark off, background sounds a little lower (-4 dB)")
 
         voice_assets = sb_get(
             f"assets?episode_id=eq.{episode_id}&type=eq.voice_line&status=eq.completed&select=line_index,scene_number,file_url"
@@ -4121,7 +4232,11 @@ def main():
                             download(qurl, qimg)
                         if not os.path.exists(qimg):
                             qimg = ""
-                        build_quiz_segment(i, card, qimg, scene_audio_path, qdur, voice_len, tmp, segment_path)
+                        if ph == "disclaimer":
+                            qdur = voice_len + 1.8
+                            build_disclaimer_segment(i, card, qimg, scene_audio_path, qdur, voice_len, tmp, segment_path)
+                        else:
+                            build_quiz_segment(i, card, qimg, scene_audio_path, qdur, voice_len, tmp, segment_path)
                         duration = qdur
                         built = True
                     except Exception as e:
