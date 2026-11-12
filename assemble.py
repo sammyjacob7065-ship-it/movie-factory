@@ -2980,6 +2980,279 @@ def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text
     print(f"scene {scene_index}: camera {'NONE (still)' if plan.get('static') else '+'.join(plan['moves'])}" + (f", transition {plan['kind']} ({plan['dir']})" if nst is not None else (", hard cut (no transition)" if plan.get("kind") == "cut" else ", ends with a fade")))
 
 
+# ---------------- YOUTUBE QUIZ CARDS (v84): the voice reads the question and the options, a 5-4-3-2-1-0 countdown runs, then the answer ticks ----------------
+# A script with a QUIZ block but no /Developer gets these scenes automatically (n8n writes them: scene["quiz_card"]).
+# phase "intro"  : a title card ("QUIZ TIME") while the voice explains
+# phase "ask"    : the question and options A-D appear while the voice reads them, then 5..0 counts down, then the right option ticks (ding)
+# phase "reveal" : the card stays with the right option ticked while the voice gives the answer and the short explanation
+QUIZ_CARDS = True
+QUIZ_COUNT_FROM = 5
+QUIZ_LEAD = 0.5          # seconds of quiet after the voice stops, before the countdown starts
+QUIZ_HOLD = 1.3          # seconds the ticked answer is shown after the tick (ask phase)
+QUIZ_GREEN = (46, 204, 113)
+QUIZ_ACCENT = (255, 196, 0)
+
+
+def quiz_ask_duration(voice_len):
+    return voice_len + QUIZ_LEAD + (QUIZ_COUNT_FROM + 1) + QUIZ_HOLD
+
+
+def _quiz_audio(audio_path, duration, tick_t, beep_times, tmp, tag):
+    """The voice, a soft beep as each digit appears, and a bell ding when the answer ticks."""
+    out = os.path.join(tmp, f"{tag}_quizaudio.wav")
+    inputs = ["-i", audio_path]
+    chains, labels = [], ["[0:a]"]
+    k = 1
+    for bt in beep_times:
+        inputs += ["-f", "lavfi", "-t", "0.09", "-i", "sine=f=880:d=0.09:r=44100"]
+        chains.append(f"[{k}:a]afade=t=out:st=0.03:d=0.06,volume=0.5,adelay={int(max(bt, 0) * 1000)}:all=1[b{k}]")
+        labels.append(f"[b{k}]")
+        k += 1
+    if tick_t is not None:
+        ms = int(max(tick_t, 0) * 1000)
+        for f_, vol, extra in ((1318, 0.5, 0), (2637, 0.22, 0)):
+            inputs += ["-f", "lavfi", "-t", "1.3", "-i", f"sine=f={f_}:d=1.3:r=44100"]
+            chains.append(f"[{k}:a]afade=t=out:st=0.05:d=1.1:curve=exp,volume={vol},adelay={ms}:all=1[b{k}]")
+            labels.append(f"[b{k}]")
+            k += 1
+    fc = ";".join(chains + [f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:normalize=0,apad,atrim=0:{duration:.3f}[o]"])
+    try:
+        run(["ffmpeg", "-y"] + inputs + ["-filter_complex", fc, "-map", "[o]", "-ar", "44100", "-ac", "2", out])
+        return out
+    except Exception as e:
+        print(f"::warning::quiz sounds skipped ({str(e)[:120]})")
+        return audio_path
+
+
+def _quiz_wrap(draw, text, font, maxw):
+    words, lines, cur = str(text).split(), [], ""
+    for w_ in words:
+        t = (cur + " " + w_).strip()
+        if draw.textlength(t, font=font) <= maxw or not cur:
+            cur = t
+        else:
+            lines.append(cur)
+            cur = w_
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def build_quiz_segment(scene_index, card, image_path, audio_path, duration, voice_len, tmp, segment_path):
+    """Draw the quiz card frame by frame (Pillow) and pipe it to ffmpeg together with the scene's voice."""
+    import numpy as np
+    from PIL import Image, ImageDraw, ImageFilter
+    W, H = WIDTH, HEIGHT
+    vert = H > W
+    phase = str(card.get("phase") or "ask")
+    opts = [str(x) for x in (card.get("o") or [])][:4]
+    right = int(card.get("a") if card.get("a") is not None else -1)
+    marks = [float(x) for x in (card.get("marks") or [])]
+    S = W / 1920.0 if not vert else W / 1080.0
+    fq = _ov_font(int((68 if not vert else 76) * S))
+    fo = _ov_font(int((58 if not vert else 64) * S))
+    fl = _ov_font(int((50 if not vert else 56) * S))
+    fh = _ov_font(int((40 if not vert else 46) * S))
+    fbig = _ov_font(int((260 if not vert else 300) * S))
+    ftitle = _ov_font(int((120 if not vert else 120) * S))
+
+    # background: the scene picture, blurred and darkened (or a plain deep blue)
+    try:
+        bg = Image.open(image_path).convert("RGB")
+        r = max(W / bg.width, H / bg.height)
+        bg = bg.resize((int(bg.width * r) + 1, int(bg.height * r) + 1))
+        bg = bg.crop(((bg.width - W) // 2, (bg.height - H) // 2, (bg.width - W) // 2 + W, (bg.height - H) // 2 + H)).filter(ImageFilter.GaussianBlur(18))
+        bg = Image.blend(bg, Image.new("RGB", (W, H), (8, 14, 34)), 0.72)
+    except Exception:
+        bg = Image.new("RGB", (W, H), (10, 18, 42))
+    base = bg.copy()
+    d = ImageDraw.Draw(base)
+    pad = int(W * (0.06 if not vert else 0.07))
+    # layout
+    if vert:
+        col_w = W - 2 * pad
+        ring_c = (W // 2, int(H * 0.86))
+        ring_r = int(W * 0.13)
+        top_y = int(H * 0.07)
+        bottom_lim = int(H * 0.74)
+    else:
+        col_w = int(W * 0.64) - pad
+        ring_c = (int(W * 0.82), int(H * 0.52))
+        ring_r = int(H * 0.2)
+        top_y = int(H * 0.09)
+        bottom_lim = int(H * 0.94)
+
+    if phase == "intro":
+        title = str(card.get("title") or "QUIZ TIME")
+        tw = d.textlength(title, font=ftitle)
+        d.text(((W - tw) / 2, H * 0.34), title, font=ftitle, fill=(255, 255, 255))
+        sub = str(card.get("sub") or "")
+        sw = d.textlength(sub, font=fo)
+        d.text(((W - sw) / 2, H * 0.34 + ftitle.size * 1.35), sub, font=fo, fill=QUIZ_ACCENT)
+        rows = []
+    else:
+        # header pill
+        head = f"QUESTION {card.get('n', 1)} OF {card.get('total', 1)}"
+        hw = d.textlength(head, font=fh)
+        d.rounded_rectangle((pad, top_y, pad + hw + 44 * S, top_y + fh.size + 26 * S), radius=int(30 * S), fill=QUIZ_ACCENT)
+        d.text((pad + 22 * S, top_y + 11 * S), head, font=fh, fill=(20, 20, 30))
+        y = top_y + fh.size + 26 * S + 34 * S
+        for ln in _quiz_wrap(d, card.get("q") or "", fq, col_w):
+            d.text((pad + 3 * S, y + 3 * S), ln, font=fq, fill=(0, 0, 0))
+            d.text((pad, y), ln, font=fq, fill=(255, 255, 255))
+            y += fq.size * 1.28
+        y += 26 * S
+        # option rows (normal + ticked version)
+        n_o = max(len(opts), 1)
+        avail = bottom_lim - y
+        row_h = int(min(fo.size * 2.2, avail / n_o - 18 * S))
+        rows = []
+        for i, t in enumerate(opts):
+            L = "ABCD"[i]
+            def make(ticked):
+                img = Image.new("RGBA", (col_w, row_h), (0, 0, 0, 0))
+                dd = ImageDraw.Draw(img)
+                fill = (22, 120, 70, 235) if ticked else (255, 255, 255, 30)
+                edge = QUIZ_GREEN + (255,) if ticked else (255, 255, 255, 110)
+                dd.rounded_rectangle((0, 0, col_w - 1, row_h - 1), radius=int(row_h * 0.28), fill=fill, outline=edge, width=int(4 * S) if ticked else int(2 * S))
+                bs = int(row_h * 0.7)
+                bx, by = int(row_h * 0.15), int(row_h * 0.15)
+                dd.ellipse((bx, by, bx + bs, by + bs), fill=(QUIZ_GREEN if ticked else QUIZ_ACCENT) + (255,))
+                lw = dd.textlength(L, font=fl)
+                dd.text((bx + (bs - lw) / 2, by + (bs - fl.size) / 2 - 3 * S), L, font=fl, fill=(15, 20, 30))
+                tx = bx + bs + int(row_h * 0.25)
+                txt = t
+                while dd.textlength(txt, font=fo) > col_w - tx - 90 * S and len(txt) > 4:
+                    txt = txt[:-2]
+                if txt != t:
+                    txt = txt.rstrip() + "..."
+                dd.text((tx, (row_h - fo.size) / 2 - 4 * S), txt, font=fo, fill=(255, 255, 255, 255))
+                if ticked:
+                    cx, cy = col_w - int(row_h * 0.55), row_h // 2
+                    s_ = int(row_h * 0.2)
+                    dd.line((cx - s_, cy, cx - s_ // 3, cy + s_ * 0.8, cx + s_ * 1.2, cy - s_ * 0.9), fill=(255, 255, 255, 255), width=int(8 * S), joint="curve")
+                return img
+            rows.append({"y": int(y + i * (row_h + 18 * S)), "n": make(False), "t": make(True)})
+
+    # timing
+    t_v = voice_len if phase == "ask" else 0.0
+    t_c0 = t_v + QUIZ_LEAD
+    # the tick happens as the "0" appears: digits 5,4,3,2,1 take 5 s, then "0" appears and the answer ticks
+    t_tick = t_c0 + QUIZ_COUNT_FROM if phase == "ask" else -1.0
+    appear = []
+    for i in range(len(opts)):
+        fr = marks[i] if i < len(marks) else (i + 1) / (len(opts) + 1)
+        appear.append(max(0.15, fr * max(t_v, 1.0) - 0.15) if phase == "ask" else -1.0)
+    qa_in = 0.15
+    if phase == "ask":
+        beeps = [t_c0 + k for k in range(QUIZ_COUNT_FROM)]
+        aud = _quiz_audio(audio_path, duration, t_tick, beeps, tmp, f"s{scene_index:03d}")
+    else:
+        aud = audio_path
+        beeps = []
+    N = max(int(round(duration * FPS)), 2)
+
+    def ring_layer(frac, digit, color):
+        sz = ring_r * 2 + 40
+        SS = 2
+        im = Image.new("RGBA", (sz * SS, sz * SS), (0, 0, 0, 0))
+        dd = ImageDraw.Draw(im)
+        c = sz * SS // 2
+        R = ring_r * SS
+        dd.ellipse((c - R, c - R, c + R, c + R), fill=(8, 14, 34, 200), outline=(255, 255, 255, 60), width=10 * SS)
+        if frac > 0.002:
+            dd.arc((c - R, c - R, c + R, c + R), start=-90, end=-90 + 360 * frac, fill=color + (255,), width=16 * SS)
+        im = im.resize((sz, sz), Image.LANCZOS)
+        dd2 = ImageDraw.Draw(im)
+        tw = dd2.textlength(str(digit), font=fbig)
+        dd2.text(((sz - tw) / 2, sz / 2 - fbig.size * 0.62), str(digit), font=fbig, fill=(255, 255, 255, 255))
+        return im
+
+    cmd = ["ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-",
+           "-i", aud,
+           "-vf", f"fade=t=in:st=0:d=0.25,fade=t=out:st={max(duration - 0.3, 0):.3f}:d=0.3,format=yuv420p",
+           "-af", f"afade=t=in:st=0:d=0.05,afade=t=out:st={max(duration - 0.25, 0):.3f}:d=0.25,apad",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", str(VIDEO_CRF), "-maxrate", VIDEO_MAXRATE, "-bufsize", "12M",
+           "-pix_fmt", "yuv420p", "-r", str(FPS), "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+           "-t", f"{duration:.3f}", segment_path]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    last_key, last_bytes = None, b""
+    ring_cache = {}
+    try:
+        for fi in range(N):
+            t = fi / FPS
+            ticked_a = 0.0
+            if phase == "reveal":
+                ticked_a = min(1.0, t / 0.35)
+            elif phase == "ask" and t >= t_tick:
+                ticked_a = min(1.0, (t - t_tick) / 0.25)
+            key = None
+            if phase == "ask" and t_c0 <= t < t_tick + 0.0:
+                key = None            # countdown moves every frame
+            else:
+                key = (tuple(round(min(max((t - a) / 0.3, 0), 1), 2) for a in appear) if phase == "ask" else 1, round(ticked_a, 2), int(min(t, 0.3) * FPS) if t < 0.3 else 99, int(t >= t_c0) if phase == "ask" else 0, int(t >= t_tick) if phase == "ask" else 0)
+            if key is not None and key == last_key:
+                proc.stdin.write(last_bytes)
+                continue
+            fr_img = base.copy()
+            if phase != "intro":
+                for i, rw in enumerate(rows):
+                    a_in = 1.0 if phase == "reveal" else min(max((t - appear[i]) / 0.3, 0), 1)
+                    if a_in <= 0:
+                        continue
+                    img = rw["n"]
+                    if i == right and ticked_a > 0:
+                        img = Image.blend(rw["n"], rw["t"], ticked_a)
+                        if phase == "ask" and 0 <= t - t_tick < 0.4:
+                            sc_ = 1.0 + 0.04 * np.sin((t - t_tick) / 0.4 * np.pi)
+                            img = img.resize((int(img.width * sc_), int(img.height * sc_)), Image.LANCZOS)
+                            ox = pad - (img.width - rw["n"].width) // 2
+                            oy = rw["y"] - (img.height - rw["n"].height) // 2
+                            if a_in < 1:
+                                img.putalpha(img.getchannel("A").point(lambda v: int(v * a_in)))
+                            fr_img.paste(img, (ox, oy), img)
+                            continue
+                    if a_in < 1:
+                        img = img.copy()
+                        img.putalpha(img.getchannel("A").point(lambda v, a=a_in: int(v * a)))
+                    fr_img.paste(img, (pad, rw["y"]), img)
+                # countdown ring (ask phase, from the end of the voice)
+                if phase == "ask" and t >= t_c0:
+                    if t < t_tick:
+                        el = t - t_c0
+                        digit = QUIZ_COUNT_FROM - int(el)
+                        frac = 1.0 - (el - int(el))
+                        low = digit <= 2
+                        rl = ring_layer(frac, digit, (255, 90, 80) if low else QUIZ_ACCENT)
+                    else:
+                        rl = ring_layer(1.0, 0, QUIZ_GREEN)
+                    fr_img.paste(rl, (ring_c[0] - rl.width // 2, ring_c[1] - rl.height // 2), rl)
+                    cap = "THINK..." if t < t_tick else "ANSWER!"
+                    cw_ = ImageDraw.Draw(fr_img).textlength(cap, font=fh)
+                    ImageDraw.Draw(fr_img).text((ring_c[0] - cw_ / 2, ring_c[1] + ring_r + 40 * S), cap, font=fh, fill=(255, 255, 255))
+                elif phase == "reveal":
+                    cap = "CORRECT ANSWER"
+                    cw_ = ImageDraw.Draw(fr_img).textlength(cap, font=fh)
+                    ImageDraw.Draw(fr_img).text((ring_c[0] - cw_ / 2, ring_c[1] - fbig.size * 0.45 - 70 * S), cap, font=fh, fill=QUIZ_GREEN)
+                    L = "ABCD"[right] if 0 <= right < 4 else ""
+                    lw = ImageDraw.Draw(fr_img).textlength(L, font=fbig)
+                    ImageDraw.Draw(fr_img).text((ring_c[0] - lw / 2, ring_c[1] - fbig.size * 0.45), L, font=fbig, fill=QUIZ_GREEN)
+            by = fr_img.tobytes()
+            proc.stdin.write(by)
+            last_key, last_bytes = key, by
+        proc.stdin.close()
+        rc = proc.wait()
+        if rc != 0:
+            raise RuntimeError(f"ffmpeg exited with {rc}")
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise
+    print(f"scene {scene_index}: quiz card ({phase}) {duration:.1f}s")
+
+
 def build_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, segment_path):
     """One scene: composite image + eased zoom + subtitles + fades + audio."""
     composite = os.path.join(tmp, f"composite_{scene_index:03d}.png")
@@ -3803,7 +4076,26 @@ def main():
 
                 # 1) animated clip, if n8n gave us one for this scene
                 built = False
-                clip_url = clip_by_scene.get(int(scene_num))
+                # 0) v84: YouTube quiz card (voice reads the question, countdown 5..0, the answer ticks)
+                card = scene.get("quiz_card") or (script_meta.get(int(scene_num)) or {}).get("quiz_card")
+                if QUIZ_CARDS and isinstance(card, dict):
+                    try:
+                        voice_len = probe_duration(scene_audio_path) if audio_parts else 0.0
+                        ph = str(card.get("phase") or "ask")
+                        qdur = quiz_ask_duration(voice_len) if ph == "ask" else voice_len + (1.0 if ph == "reveal" else 0.8)
+                        qdur = max(qdur, 3.0)
+                        qimg = os.path.join(tmp, f"s{scene_num}.png")
+                        qurl = image_by_scene.get(scene_num)
+                        if qurl and not os.path.exists(qimg):
+                            download(qurl, qimg)
+                        if not os.path.exists(qimg):
+                            qimg = ""
+                        build_quiz_segment(i, card, qimg, scene_audio_path, qdur, voice_len, tmp, segment_path)
+                        duration = qdur
+                        built = True
+                    except Exception as e:
+                        print(f"::warning::scene {scene_num}: quiz card not drawn ({str(e)[:200]}) - using the normal picture")
+                clip_url = None if built else clip_by_scene.get(int(scene_num))
                 if clip_url:
                     try:
                         clip_path = os.path.join(tmp, f"s{scene_num}_clip.mp4")
