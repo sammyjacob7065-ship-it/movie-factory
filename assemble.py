@@ -4031,6 +4031,11 @@ def main():
 
         script_lines = ep["script_lines"]
         scenes = sorted(ep["scenes"], key=lambda s: s["scene_number"])
+        # v85: /Developer = teaching mode = no watermark anywhere in the video
+        if any(isinstance(sc_, dict) and sc_.get("lesson_page") for sc_ in scenes):
+            global WATERMARK_TEXT
+            WATERMARK_TEXT = ""
+            print("teaching mode (/Developer): watermark off")
 
         voice_assets = sb_get(
             f"assets?episode_id=eq.{episode_id}&type=eq.voice_line&status=eq.completed&select=line_index,scene_number,file_url"
