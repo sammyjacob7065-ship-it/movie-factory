@@ -1776,10 +1776,11 @@ def _subscribe_audio(audio_path, t_click, duration, tmp, tag):
 # Several LABEL / ANIMATION lines in one scene are allowed. The words are drawn by the video builder, so they are always sharp and exactly as written.
 OVERLAYS = True
 OVERLAY_ACCENT = (0, 196, 255)
+WORD_SYNC = True   # v85: words/labels/spotlights appear exactly when the voice says their word
 OVERLAY_TEXT_BOOST = 1.45        # on-screen words (typed text, arrows, pop-ins, labels) are this much bigger: easy to read in a lesson video        # B, G, R of the accent colour (a warm yellow-orange)
 CINEMA_STATIC_CLEAN = True            # NO CAMERA scenes: no vignette and no film grain, so small screen text stays clear
 
-_ANIM_VERBS = r"scale|stagger|split|slide|fade|label|cursor|mouse|pointer|click|clicks|clicking|type|types|typing|type-on|pop|pop-in|appear|appears|highlight|highlights|scroll|scrolls|scrolling|arrow|reveal|underline|draw"
+_ANIM_VERBS = r"spotlight|spot|focus|scale|stagger|split|slide|fade|label|cursor|mouse|pointer|click|clicks|clicking|type|types|typing|type-on|pop|pop-in|appear|appears|highlight|highlights|scroll|scrolls|scrolling|arrow|reveal|underline|draw"
 
 
 def _ov_clean(s, n=120):
@@ -1919,6 +1920,11 @@ def parse_overlays(scene):
                 quoted = re.search(r"[\"“](.+?)[\"”]", act) or re.search(r"'([^']{2,})'", act)
                 qtext = _ov_clean(quoted.group(1), 90) if quoted else ""
                 pos = _ov_pos(re.sub(r"[\"“].+?[\"”]", " ", act))
+                if re.match(r"(?i)^(?:spotlight|spot|focus)\b", act):
+                    # v85: spotlight "HIPPOCAMPUS" at 60%,40%  -> everything dims except that spot, a label names it, timed to the spoken word
+                    if pos:
+                        anims.append({"kind": "spot", "text": qtext, "pos": pos})
+                    continue
                 if re.match(r"(?i)^(?:cursor|mouse|pointer|click|double)", act) or re.search(r"\bcursor\b|\bmouse\b|\bpointer\b", low):
                     anims.append({"kind": "cursor", "pos": pos, "click": bool(re.search(r"\bclick", low)), "double": "double" in low})
                 elif re.match(r"(?i)^(?:type|types|typing)", act):
@@ -2293,6 +2299,86 @@ class _OvCursor(_OvItem):
         _ov_blit(frame, self.img, px - self.off * 1.0, py - self.off * 1.0, scale=press, alpha=a, anchor="tl")
 
 
+class _OvSpot(_OvItem):
+    """Everything dims except one round spot with a gold ring."""
+
+    def __init__(self, pos, W, H, u, t0, t1):
+        import cv2, numpy as np
+        self.t0, self.t1 = t0, t1
+        r = int(0.17 * H)
+        c = (int(pos[0] * W), int(pos[1] * H))
+        m = np.full((H, W), 0.42, dtype=np.float32)
+        cv2.circle(m, c, r, 1.0, -1)
+        k = max(3, int(r * 0.35) | 1)
+        self.mask = cv2.GaussianBlur(m, (k, k), 0)[:, :, None]
+        self.c, self.r = c, r
+        self.ring = max(3, int(5 * u / OVERLAY_TEXT_BOOST * 1.2))
+
+    def draw(self, frame, t):
+        import cv2, numpy as np
+        a = self.fade(t, 0.35, 0.35)
+        if a <= 0.01:
+            return
+        m = 1.0 - (1.0 - self.mask) * a
+        frame[:] = np.clip(frame.astype(np.float32) * m, 0, 255).astype(np.uint8)
+        cv2.circle(frame, self.c, self.r, (0, 196, 255), self.ring, cv2.LINE_AA)
+
+
+_WHISPER = {"model": None, "tried": False}
+
+
+def _word_list_for(audio_path, text):
+    """[(word, start_seconds)] for the scene voice. Exact (speech recogniser) when faster-whisper is installed, otherwise estimated from the text."""
+    toks = re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", text or "")
+    if not toks:
+        return []
+    try:
+        if not _WHISPER["tried"]:
+            _WHISPER["tried"] = True
+            try:
+                from faster_whisper import WhisperModel
+                _WHISPER["model"] = WhisperModel("tiny.en", device="cpu", compute_type="int8")
+            except Exception:
+                _WHISPER["model"] = None
+        if _WHISPER["model"] is not None:
+            segs, _ = _WHISPER["model"].transcribe(audio_path, word_timestamps=True, language="en", beam_size=1)
+            out = []
+            for sg in segs:
+                for w_ in (sg.words or []):
+                    ww = re.sub(r"[^a-z0-9']", "", w_.word.lower())
+                    if ww:
+                        out.append((ww, float(w_.start)))
+            if len(out) >= max(3, len(toks) // 2):
+                return out
+    except Exception as e:
+        print(f"::warning::exact word timing not used ({str(e)[:100]})")
+    vlen = probe_duration(audio_path)
+    lead, tail = 0.12, 0.15
+    wts, i = [], 0
+    for m_ in re.finditer(r"([A-Za-z0-9][A-Za-z0-9'\-]*)([^A-Za-z0-9]*)", text):
+        w, punc = m_.group(1), m_.group(2)
+        pw = 6.0 if re.search(r"[.!?]", punc) else (3.0 if re.search(r"[,;:\u2014-]", punc) else 0.0)
+        wts.append((w.lower(), len(w) + 2.0, pw))
+    total = sum(a + b for _, a, b in wts) or 1.0
+    span = max(vlen - lead - tail, 0.5)
+    out, acc = [], 0.0
+    for w, a, b in wts:
+        out.append((re.sub(r"[^a-z0-9']", "", w), lead + acc / total * span))
+        acc += a + b
+    return out
+
+
+def _word_time_for(words, text):
+    for tok in re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", text or ""):
+        tl = re.sub(r"[^a-z0-9']", "", tok.lower())
+        if len(tl) < 4:
+            continue
+        for w, t in words:
+            if w == tl or (len(tl) >= 5 and (w.startswith(tl[:-1]) or tl.startswith(w[:-1])) and len(w) >= 4):
+                return t
+    return None
+
+
 class _Overlay:
     def __init__(self, spec, W, H, duration, td):
         self.W, self.H = W, H
@@ -2332,6 +2418,9 @@ class _Overlay:
             elif k == "highlight":
                 plan.append(("highlight", an, tc, 0.5, None, None))
                 tc += 0.6
+            elif k == "spot":
+                plan.append(("spot", an, tc, 0.5, None, None))
+                tc += 1.2
             elif k == "scroll":
                 plan.append(("scroll", an, 0.35, 0.0, None, None))
         f = 1.0
@@ -2339,9 +2428,15 @@ class _Overlay:
             f = max((avail - 0.5) / max(tc - 0.5, 0.1), 0.35)
         sc = lambda x: 0.5 + (x - 0.5) * f
         cur_steps = []
+        words = spec.get("words") or []
+        spots = []
         for (k, an, t0, dur, a, b) in plan:
             t0 = sc(t0) if k != "scroll" else t0
             dur = dur * f
+            if words and k in ("type", "pop", "highlight", "spot") and an.get("text"):
+                wt = _word_time_for(words, an["text"])      # v85: appears exactly when the voice says its word
+                if wt is not None:
+                    t0 = min(max(wt - 0.12, 0.2), max(avail - 0.8, 0.3))
             if k == "cursor":
                 if dur > 0:
                     st_ = {"t0": t0, "t1": t0 + dur, "a": a, "b": b, "click": None, "double": an.get("double", False)}
@@ -2359,6 +2454,15 @@ class _Overlay:
                 self._add_label(an.get("style", "highlight"), an.get("text", ""), an.get("pos") or (0.5, 0.5), u, t0, avail)
             elif k == "scroll":
                 self.items.append(_OvScroll(an["text"], W, H, u, t0, avail))
+            elif k == "spot":
+                spots.append((t0, an))
+        spots.sort(key=lambda x: x[0])
+        for si, (t0_, an_) in enumerate(spots):
+            t1_ = min((spots[si + 1][0] + 0.2) if si + 1 < len(spots) else avail, t0_ + 5.0, avail)   # a spotlight stays about 5 s at most
+            self.items.append(_OvSpot(an_.get("pos") or (0.5, 0.5), W, H, u, t0_, max(t1_, t0_ + 1.0)))
+            if an_.get("text"):
+                px_, py_ = an_["pos"]
+                self.items.append(_OvTag(an_["text"], (px_, min(py_ + 0.2, 0.92)), W, H, u, t0_ + 0.15, max(t1_, t0_ + 1.0)))
         if cur_steps:
             self.items.append(_OvCursor(cur_steps, W, H, u, avail))
         self.items.sort(key=lambda i: (isinstance(i, _OvCursor), i.t0))
@@ -2928,7 +3032,13 @@ def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text
     ov = None
     if plan.get("overlays"):
         try:
-            ov = _Overlay(plan["overlays"], WIDTH, HEIGHT, duration, td)
+            _spec = dict(plan["overlays"])
+            if WORD_SYNC and audio_path and sub_text and any(a_.get("text") for a_ in _spec.get("anims", [])):
+                try:
+                    _spec["words"] = _word_list_for(audio_path, sub_text)
+                except Exception as e:
+                    print(f"::warning::word timing skipped ({str(e)[:100]})")
+            ov = _Overlay(_spec, WIDTH, HEIGHT, duration, td)
             print(f"scene {scene_index}: {len(ov.items)} on-screen items (labels/animations)")
         except Exception as e:
             print(f"::warning::labels/animations skipped ({e})")
