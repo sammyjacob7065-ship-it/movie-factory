@@ -70,6 +70,8 @@ _CAP_KERN = {"AA":15,"AC":-49,"AG":-48,"AO":-49,"AQ":-49,"AS":-28,"AT":-97,"AU":
 
 # ---- BRAND WATERMARK (edit here) ----
 WATERMARK_TEXT = "SAMSON_SET"   # "" = no watermark
+TEACHING_MODE = False           # v89: set when the script is a /Developer lesson
+KB_ZOOM = 0.045                  # v89: teaching lessons: the whole picture (with its labels and highlights) pushes in / pulls out by this much, so nothing sits dead still
 WATERMARK_OPACITY = 0.40            # 0.0 invisible ... 1.0 solid; 0.35-0.5 looks professional
 WATERMARK_SIZE = 0.035              # letter height as a share of the short side of the frame (0.028 = small)
 WATERMARK_POSITION = "top-right"    # top-right, top-left, bottom-right, bottom-left or center
@@ -1433,7 +1435,13 @@ def cinema_plan(idx, scene, meta):
     dev = parse_dev(scene)
     if dev:
         static = True                             # a live page is never moved by the camera
-    return {"dev": dev, "static": static, "overlays": parse_overlays(scene), "moves": moves, "strength": strength, "kind": kind, "dir": d, "cam_text": cam, "tr_text": tr, "subscribe": parse_subscribe(scene), "end": parse_end(scene)}
+    # v89: in a /Developer lesson a "still" scene is not dead: the whole frame (picture + labels + highlights together, so they stay aligned)
+    # slowly pushes in, then the next scene pulls out, so the motion is continuous. Write  CAMERA: still  in a scene to keep it fully still.
+    _still_txt = bool(re.search(r"(?i)\bcamera\s*[:=-]?\s*(?:off|none|still|static|locked)\b|\bstay(?:s)? still\b|\bnothing moves\b", cam or ""))
+    kb = None
+    if TEACHING_MODE and static and not dev and not _still_txt:
+        kb = "push" if (idx % 2 == 0) else "pull"
+    return {"kb": kb, "dev": dev, "static": static, "overlays": parse_overlays(scene), "moves": moves, "strength": strength, "kind": kind, "dir": d, "cam_text": cam, "tr_text": tr, "subscribe": parse_subscribe(scene), "end": parse_end(scene)}
 
 
 # ---------------- SUBSCRIBE LABEL (v71): an animated subscribe button, placed by the script ----------------
@@ -3151,6 +3159,23 @@ def _peek_first(gen):
     return _again()
 
 
+def _kb_frame(frame, t, mode):
+    """v89: slow push-in ("push": 1.00 -> 1+KB_ZOOM) or pull-out ("pull": the reverse) of the finished frame, with a small sideways drift.
+    The labels and highlights are already in the frame, so they move with the picture and never drift off the thing they point at.
+    push ends where pull starts, so the motion carries from scene to scene."""
+    import cv2
+    import numpy as np
+    t = min(max(t, 0.0), 1.0)
+    e = t * t * (3 - 2 * t)                       # ease in and out
+    a = e if mode == "push" else 1.0 - e
+    z = 1.0 + KB_ZOOM * a
+    h, w = frame.shape[:2]
+    dx = (z - 1.0) * w * 0.30
+    M = np.float32([[z, 0, (1 - z) * w / 2.0 - dx * a], [0, z, (1 - z) * h / 2.0]])
+    return cv2.warpAffine(np.ascontiguousarray(frame), M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+
+
+
 def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, segment_path,
                          plan, next_image=None, next_plan=None, is_first=False, is_last=False):
     """One scene with the 2.5D camera. The last frames melt into the first picture of the next scene (when there is one)."""
@@ -3270,6 +3295,8 @@ def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text
                 frame = cin_finish(frame, tools, k, clean=bool(plan.get("static")))
                 if ov is not None:
                     frame = ov.draw(np.ascontiguousarray(frame), k / float(FPS))
+                if plan.get("kb") and devgen is None:
+                    frame = _kb_frame(frame, k / float(max(N - 1, 1)), plan["kb"])
                 if lab is not None and lab_t0 <= k / float(FPS) < lab_t0 + lab.T:
                     frame = lab.draw(np.ascontiguousarray(frame), k / float(FPS) - lab_t0)
                 if endt is not None and k / float(FPS) >= endt_t0:
@@ -3290,7 +3317,7 @@ def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text
         rc = proc.wait()
     if rc != 0:
         raise RuntimeError("cinema ffmpeg failed: " + open(log_path).read()[-400:])
-    print(f"scene {scene_index}: camera {'NONE (still)' if plan.get('static') else '+'.join(plan['moves'])}" + (f", transition {plan['kind']} ({plan['dir']})" if nst is not None else (", hard cut (no transition)" if plan.get("kind") == "cut" else ", ends with a fade")))
+    print(f"scene {scene_index}: camera {('slow ' + plan['kb'] + ' (whole frame)' if plan.get('kb') else 'NONE (still)') if plan.get('static') else '+'.join(plan['moves'])}" + (f", transition {plan['kind']} ({plan['dir']})" if nst is not None else (", hard cut (no transition)" if plan.get("kind") == "cut" else ", ends with a fade")))
 
 
 # ---------------- YOUTUBE QUIZ CARDS (v84): the voice reads the question and the options, a 5-4-3-2-1-0 countdown runs, then the answer ticks ----------------
@@ -4651,8 +4678,9 @@ def main():
         scenes = sorted(ep["scenes"], key=lambda s: s["scene_number"])
         # v85: /Developer = teaching mode = no watermark anywhere in the video
         if any(isinstance(sc_, dict) and sc_.get("lesson_page") for sc_ in scenes):
-            global WATERMARK_TEXT
+            global WATERMARK_TEXT, TEACHING_MODE
             WATERMARK_TEXT = ""
+            TEACHING_MODE = True
             # v85: teaching mode = the voice must be clear: background music and sound effects are kept very low
             global SFX_ONCE_REL_DB, SFX_REPEAT_REL_DB, SFX_BED_REL_DB, SFX_MUSIC_REL_DB, SFX_MUSIC_DUCK_RATIO, SFX_DUCK_RATIO, MUSIC_VOLUME
             SFX_ONCE_REL_DB, SFX_REPEAT_REL_DB, SFX_BED_REL_DB = SFX_ONCE_REL_DB - 4.0, SFX_REPEAT_REL_DB - 4.0, SFX_BED_REL_DB - 4.0   # only about 4 dB lower than a normal video
