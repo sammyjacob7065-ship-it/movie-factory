@@ -76,7 +76,7 @@ jobs:
       # NEW (v85): exact word timing, so labels, pops and spotlights appear when the voice says the word. Only for scenes with animations.
       # If it does not install, the builder falls back to estimated timing and the video still builds.
       - name: Install word timing (only if a scene has animations)
-        if: contains(inputs.manifest, 'overlay_anims')
+        if: contains(inputs.manifest, 'overlay_anims') || contains(inputs.manifest, 'lesson_page')
         continue-on-error: true
         run: |
           timeout 300 pip install faster-whisper || echo "WARNING: word timing did not install - estimated timing will be used"
