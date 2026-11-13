@@ -3672,6 +3672,167 @@ def build_disclaimer_segment(scene_index, card, image_path, audio_path, duration
         raise
     print(f"scene {scene_index}: typed notice {duration:.1f}s")
 
+
+def _whoosh_audio(audio_path, duration, times, tmp, tag):
+    """The voice plus a soft whoosh each time a picture slides in."""
+    import numpy as np, wave
+    sr = 44100
+    n = int(duration * sr) + sr
+    buf = np.zeros(n, dtype=np.float32)
+    rng = np.random.RandomState(11)
+    for t in times:
+        i0 = int(t * sr); L = int(0.45 * sr)
+        if i0 + L >= n:
+            continue
+        x = np.linspace(0, 1, L)
+        env = np.sin(np.pi * x) ** 2
+        noise = rng.uniform(-1, 1, L)
+        k = max(2, int(40 - 34 * x.mean()))
+        sm = np.convolve(noise, np.ones(k) / k, mode="same")
+        buf[i0:i0 + L] += (sm * env * 0.5).astype(np.float32)
+    pcm = (np.clip(buf, -1, 1) * 32767).astype(np.int16)
+    wav = os.path.join(tmp, f"{tag}_whoosh.wav")
+    with wave.open(wav, "wb") as w_:
+        w_.setnchannels(1); w_.setsampwidth(2); w_.setframerate(sr); w_.writeframes(pcm.tobytes())
+    out = os.path.join(tmp, f"{tag}_staffaudio.wav")
+    try:
+        run(["ffmpeg", "-y", "-i", audio_path, "-i", wav, "-filter_complex",
+             f"[0:a][1:a]amix=inputs=2:duration=longest:normalize=0,apad,atrim=0:{duration:.3f}[o]", "-map", "[o]", "-ar", "44100", "-ac", "2", out])
+        return out
+    except Exception as e:
+        print(f"::warning::whoosh skipped ({str(e)[:120]})")
+        return audio_path
+
+
+def build_staff_segment(scene_index, card, image_path, audio_path, duration, voice_len, tmp, segment_path):
+    """v88: a staff introduction card. The photo slides in and gets a ring, the name rises, the position pops. Photo comes from the script's link."""
+    from PIL import Image, ImageDraw, ImageFilter
+    import math
+    W, H = WIDTH, HEIGHT
+    S = (W / 1920.0) if W >= H else (W / 1080.0)
+    name = str(card.get("name") or "").strip().upper()
+    role = str(card.get("role") or "").strip().upper()
+    land = W >= H
+    try:
+        bg = Image.open(image_path).convert("RGB")
+        r = max(W / bg.width, H / bg.height)
+        bg = bg.resize((int(bg.width * r) + 1, int(bg.height * r) + 1))
+        bg = bg.crop(((bg.width - W) // 2, (bg.height - H) // 2, (bg.width - W) // 2 + W, (bg.height - H) // 2 + H)).filter(ImageFilter.GaussianBlur(20))
+        bg = Image.blend(bg, Image.new("RGB", (W, H), (8, 14, 34)), 0.84)
+    except Exception:
+        bg = Image.new("RGB", (W, H), (10, 18, 42))
+    D = int((0.52 * H) if land else (0.40 * H))
+    portrait = None
+    purl = str(card.get("photo") or "").strip()
+    if purl:
+        try:
+            pp = os.path.join(tmp, f"staff_{scene_index:03d}.img")
+            download(purl, pp)
+            im = Image.open(pp).convert("RGB")
+            side = min(im.width, im.height)
+            # faces are usually in the upper half of a portrait: crop a little higher than centre
+            ty = max(0, min(im.height - side, int((im.height - side) * 0.25)))
+            im = im.crop(((im.width - side) // 2, ty, (im.width - side) // 2 + side, ty + side)).resize((D, D), Image.LANCZOS)
+            portrait = im
+        except Exception as e:
+            print(f"::warning::staff photo not loaded ({str(e)[:120]}) - showing initials")
+    if portrait is None:
+        portrait = Image.new("RGB", (D, D), (24, 48, 96))
+        dd = ImageDraw.Draw(portrait)
+        ini = "".join(w_[0] for w_ in name.split()[:2]) or "?"
+        fi = _ov_font(int(D * 0.4))
+        tw = dd.textlength(ini, font=fi)
+        dd.text(((D - tw) / 2, D * 0.28), ini, font=fi, fill=(255, 255, 255))
+    SSX = 3
+    mask = Image.new("L", (D * SSX, D * SSX), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, D * SSX - 1, D * SSX - 1), fill=255)
+    mask = mask.resize((D, D), Image.LANCZOS)
+    f_name = _ov_font(int((84 if land else 70) * S)); f_role = _ov_font(int((44 if land else 40) * S))
+    probe = ImageDraw.Draw(bg)
+    maxw = (W * 0.46) if land else (W * 0.86)
+    def wrap(txt, f):
+        words, out, cur = txt.split(), [], ""
+        for w_ in words:
+            t = (cur + " " + w_).strip()
+            if probe.textlength(t, font=f) <= maxw or not cur:
+                cur = t
+            else:
+                out.append(cur); cur = w_
+        if cur: out.append(cur)
+        return out[:3]
+    nl = wrap(name, f_name)
+    ring_w = max(6, int(10 * S)); pad_r = ring_w + int(8 * S)
+    if land:
+        px_final = int(W * 0.08) + pad_r; py = int((H - D) / 2)
+        tx = px_final + D + int(W * 0.06); ty0 = int(H * 0.5 - (len(nl) * f_name.size * 1.15 + f_role.size * 2.6) / 2)
+    else:
+        px_final = int((W - D) / 2); py = int(H * 0.14)
+        tx = int(W * 0.07); ty0 = py + D + int(H * 0.06)
+    t_photo, t_ring, t_name, t_role = 0.25, 0.9, 1.15, 1.7
+    aud = _whoosh_audio(audio_path, duration, [t_photo, t_name, t_role], tmp, f"s{scene_index:03d}")
+    ease = lambda x: 1 - (1 - min(max(x, 0), 1)) ** 3
+    N = max(int(round(duration * FPS)), 2)
+    cmd = ["ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-", "-i", aud,
+           "-vf", f"fade=t=in:st=0:d=0.35,fade=t=out:st={max(duration - 0.4, 0):.3f}:d=0.4,format=yuv420p",
+           "-af", f"afade=t=in:st=0:d=0.05,afade=t=out:st={max(duration - 0.3, 0):.3f}:d=0.3,apad",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", str(VIDEO_CRF), "-maxrate", VIDEO_MAXRATE, "-bufsize", "12M",
+           "-pix_fmt", "yuv420p", "-r", str(FPS), "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", "-t", f"{duration:.3f}", segment_path]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        for fi in range(N):
+            t = fi / FPS
+            im = bg.copy(); dd = ImageDraw.Draw(im, "RGBA")
+            # accent stripe that sweeps across the bottom
+            sw = ease((t - 0.1) / 0.8)
+            dd.rectangle((0, int(H * 0.93), int(W * sw), int(H * 0.93) + int(10 * S)), fill=QUIZ_ACCENT + (255,))
+            # photo slides in from the right edge with a gentle float afterwards
+            pe = ease((t - t_photo) / 0.75)
+            fl = math.sin(t * 1.6) * 6 * S if t > t_photo + 0.75 else 0
+            px = int(px_final + (1 - pe) * (W - px_final)) if land else px_final
+            pyy = int(py + fl) if land else int(py + (1 - pe) * H * 0.3 + fl)
+            if pe > 0:
+                im.paste(portrait, (px, pyy), mask)
+                # ring draws around the photo
+                re_ = ease((t - t_ring) / 0.7)
+                if re_ > 0:
+                    box = (px - pad_r, pyy - pad_r, px + D + pad_r, pyy + D + pad_r)
+                    dd.arc(box, -90, -90 + 360 * re_, fill=QUIZ_ACCENT + (255,), width=ring_w)
+            # name rises line by line
+            ne = ease((t - t_name) / 0.6)
+            y = ty0
+            if ne > 0:
+                lay = Image.new("RGBA", (W, H), (0, 0, 0, 0)); ld = ImageDraw.Draw(lay)
+                yy = y + (1 - ne) * 50 * S
+                for l in nl:
+                    ld.text((tx + 3 * S, yy + 3 * S), l, font=f_name, fill=(0, 0, 0, int(200 * ne)))
+                    ld.text((tx, yy), l, font=f_name, fill=(255, 255, 255, int(255 * ne)))
+                    yy += f_name.size * 1.15
+                im.paste(lay, (0, 0), lay)
+            y += len(nl) * f_name.size * 1.15 + 18 * S
+            # underline grows, then the position pops in
+            ue = ease((t - t_name - 0.2) / 0.5)
+            if ue > 0:
+                dd.rectangle((tx, int(y), int(tx + (W * 0.2 if land else W * 0.3) * ue), int(y) + int(6 * S)), fill=QUIZ_ACCENT + (255,))
+            y += 28 * S
+            re2 = ease((t - t_role) / 0.45)
+            if re2 > 0:
+                rw = dd.textlength(role, font=f_role); rh = f_role.size
+                sc_ = 0.6 + 0.4 * re2
+                cw, ch = (rw + 56 * S) * sc_, (rh + 30 * S) * sc_
+                dd.rounded_rectangle((tx, y, tx + cw, y + ch), radius=int(ch / 2), fill=QUIZ_ACCENT + (int(255 * re2),))
+                if re2 > 0.85:
+                    dd.text((tx + 28 * S, y + 13 * S), role, font=f_role, fill=(20, 20, 30))
+            proc.stdin.write(im.tobytes())
+        proc.stdin.close()
+        if proc.wait() != 0:
+            raise RuntimeError("ffmpeg failed")
+    except Exception:
+        try: proc.kill()
+        except Exception: pass
+        raise
+    print(f"scene {scene_index}: staff card {name} {duration:.1f}s")
+
+
 def build_segment(scene_index, image_path, audio_path, duration, sub_text, tmp, segment_path):
     """One scene: composite image + eased zoom + subtitles + fades + audio."""
     composite = os.path.join(tmp, f"composite_{scene_index:03d}.png")
@@ -3917,6 +4078,70 @@ def upload_to_release(path, episode_id, tmp):
 # ---- v70: a small playable copy goes to Supabase, so the Telegram link opens and plays in the browser like before ----
 PREVIEW_ENABLED = True
 PREVIEW_MAX_MB = 45          # stays under the Supabase Free 50 MB limit
+
+
+
+def _caption_cues(text, words, voice_len, offset):
+    """v86: the spoken text of one scene -> caption cues (start, end, text) on the film's timeline. One sentence per cue, long ones split at a comma."""
+    text = re.sub(r"\s+", " ", text or "").strip()
+    if not text:
+        return []
+    sents = [x.strip() for x in re.split(r"(?<=[.!?])\s+", text) if x.strip()]
+    def _split(x):
+        if len(x) <= 120:
+            return [x]
+        mid = len(x) // 2
+        cuts = [m_.end() for m_ in re.finditer(r"[,;:]\s+|\s+(?:and|but|because|so|then|which)\s+", x)]
+        cut = min(cuts, key=lambda c: abs(c - mid)) if cuts else x.rfind(" ", 0, mid)
+        if not cut or cut <= 8 or cut >= len(x) - 8:
+            return [x]
+        return _split(x[:cut].strip()) + _split(x[cut:].strip())
+    pieces = []
+    for sn in sents:
+        pieces += _split(sn)
+    tok = lambda t: len(re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", t))
+    total = sum(tok(x) for x in pieces) or 1
+    wl = words or []
+    cues, acc = [], 0
+    for k, pc in enumerate(pieces):
+        if wl:
+            idx = min(int(round(acc / total * len(wl))), len(wl) - 1)
+            st = wl[idx][1]
+        else:
+            st = acc / total * voice_len
+        cues.append([max(st, 0.0), pc])
+        acc += tok(pc)
+    out = []
+    for k, (st, pc) in enumerate(cues):
+        en = cues[k + 1][0] if k + 1 < len(cues) else voice_len + 0.25
+        if en - st < 0.8:
+            en = st + 0.8
+        out.append({"s": round(offset + st, 2), "e": round(offset + en, 2), "t": pc})
+    return out
+
+
+def _vtt_time(t, comma=False):
+    h = int(t // 3600); m_ = int((t % 3600) // 60); sec = t % 60
+    return f"{h:02d}:{m_:02d}:{sec:06.3f}".replace(".", "," if comma else ".")
+
+
+def publish_captions(cues, episode_id, tmp):
+    """v86: captions for the film (JSON for the student page, .vtt and .srt for YouTube) saved in Supabase Storage under captions/."""
+    if not cues:
+        return
+    import json as _json
+    vtt = "WEBVTT\n\n" + "\n\n".join(f"{_vtt_time(c['s'])} --> {_vtt_time(c['e'])}\n{c['t']}" for c in cues) + "\n"
+    srt = "\n\n".join(f"{i + 1}\n{_vtt_time(c['s'], True)} --> {_vtt_time(c['e'], True)}\n{c['t']}" for i, c in enumerate(cues)) + "\n"
+    jsn = _json.dumps({"cues": cues}, ensure_ascii=False)
+    for name, body, ctype in ((f"{episode_id}.json", jsn, "application/json"), (f"{episode_id}.vtt", vtt, "text/vtt"), (f"{episode_id}.srt", srt, "application/x-subrip")):
+        try:
+            r = requests.post(f"{SUPABASE_URL}/storage/v1/object/{BUCKET}/captions/{name}",
+                              headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": ctype + "; charset=utf-8", "x-upsert": "true"},
+                              data=body.encode("utf-8"), timeout=(20, 60))
+            r.raise_for_status()
+        except Exception as e:
+            print(f"::warning::captions file {name} not saved ({str(e)[:120]})")
+    print(f"captions saved: {len(cues)} lines (captions/{episode_id}.vtt and .srt are ready for YouTube)")
 
 
 def upload_preview_copy(path, episode_id, tmp):
@@ -4456,6 +4681,7 @@ def main():
         with tempfile.TemporaryDirectory() as tmp:
             segment_paths = []
             scene_spans = {}     # scene number -> (start second in the film, length), for placing sound effects
+            caption_cues = []    # v86: captions on the film's timeline
             film_cursor = 0.0
 
             for i, scene in enumerate(scenes):
@@ -4522,6 +4748,9 @@ def main():
                         if ph == "disclaimer":
                             qdur = voice_len + 1.8
                             build_disclaimer_segment(i, card, qimg, scene_audio_path, qdur, voice_len, tmp, segment_path)
+                        elif ph == "staff":
+                            qdur = max(voice_len + 1.6, 4.0)
+                            build_staff_segment(i, card, qimg, scene_audio_path, qdur, voice_len, tmp, segment_path)
                         else:
                             build_quiz_segment(i, card, qimg, scene_audio_path, qdur, voice_len, tmp, segment_path)
                         duration = qdur
@@ -4594,6 +4823,15 @@ def main():
                 except Exception:
                     seg_len = duration
                 scene_spans[int(scene_num)] = (film_cursor, seg_len)
+                try:
+                    if audio_parts:
+                        _say = " ".join(str(l.get("text") or "") for l in lines_by_scene.get(scene_num, [])).strip()
+                        if _say:
+                            _vl = probe_duration(scene_audio_path)
+                            _wl = _word_list_for(scene_audio_path, _say) if WORD_SYNC else []
+                            caption_cues += _caption_cues(_say, _wl, _vl, film_cursor)
+                except Exception as e:
+                    print(f"::warning::captions for scene {scene_num} skipped ({str(e)[:100]})")
                 film_cursor += seg_len
 
             final_list = os.path.join(tmp, "final_list.txt")
@@ -4616,6 +4854,10 @@ def main():
                 except Exception as e:
                     print(f"::warning::sound effects could not be added ({e}) - the film keeps its narration only")
 
+            try:
+                publish_captions(caption_cues, episode_id, tmp)
+            except Exception as e:
+                print(f"::warning::captions not saved ({str(e)[:100]})")
             final_path = os.path.join(tmp, "final.mp4")
             master_audio_and_music(joined_path, final_path)
             public_url = None
