@@ -3700,7 +3700,7 @@ def build_disclaimer_segment(scene_index, card, image_path, audio_path, duration
     print(f"scene {scene_index}: typed notice {duration:.1f}s")
 
 
-def _whoosh_audio(audio_path, duration, times, tmp, tag):
+def _staff_whoosh_audio(audio_path, duration, times, tmp, tag):
     """The voice plus a soft whoosh each time a picture slides in."""
     import numpy as np, wave
     sr = 44100
@@ -3796,7 +3796,7 @@ def build_staff_segment(scene_index, card, image_path, audio_path, duration, voi
         px_final = int((W - D) / 2); py = int(H * 0.14)
         tx = int(W * 0.07); ty0 = py + D + int(H * 0.06)
     t_photo, t_ring, t_name, t_role = 0.25, 0.9, 1.15, 1.7
-    aud = _whoosh_audio(audio_path, duration, [t_photo, t_name, t_role], tmp, f"s{scene_index:03d}")
+    aud = _staff_whoosh_audio(audio_path, duration, [t_photo, t_name, t_role], tmp, f"s{scene_index:03d}")
     ease = lambda x: 1 - (1 - min(max(x, 0), 1)) ** 3
     N = max(int(round(duration * FPS)), 2)
     cmd = ["ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-", "-i", aud,
