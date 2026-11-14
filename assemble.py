@@ -3731,6 +3731,180 @@ def _staff_whoosh_audio(audio_path, duration, times, tmp, tag):
         return audio_path
 
 
+def _square_portrait(path, D):
+    """A square, face-friendly crop of an AI portrait picture (works for wide and tall pictures)."""
+    from PIL import Image
+    im = Image.open(path).convert("RGB")
+    side = min(im.width, im.height)
+    if im.width >= im.height:
+        x0, y0 = (im.width - side) // 2, 0
+    else:
+        x0, y0 = 0, int((im.height - side) * 0.18)
+    return im.crop((x0, y0, x0 + side, y0 + side)).resize((D, D), Image.LANCZOS)
+
+
+def _team_slots(count, W, H, land):
+    """Football-style formation: centre points (x, y) in pixels for each position, plus the circle size and the label height."""
+    if land:
+        ax0, ax1, ay0, ay1 = 0.08 * W, 0.92 * W, 0.25 * H, 0.915 * H
+        form = {1: [(.5, .5)], 2: [(.3, .5), (.7, .5)], 3: [(.5, .22), (.3, .78), (.7, .78)],
+                4: [(.38, .22), (.62, .22), (.2, .78), (.8, .78)],
+                5: [(.3, .22), (.7, .22), (.15, .78), (.5, .78), (.85, .78)],
+                6: [(.18, .22), (.5, .22), (.82, .22), (.18, .78), (.5, .78), (.82, .78)]}[count]
+        D = int({1: .42, 2: .34, 3: .25, 4: .22, 5: .21, 6: .21}[count] * H)
+    else:
+        ax0, ax1, ay0, ay1 = 0.06 * W, 0.94 * W, 0.19 * H, 0.96 * H
+        rows = (count + 1) // 2
+        form = []
+        for r in range(rows):
+            fy = (r + 0.5) / rows
+            if count % 2 == 1 and r == rows - 1:
+                form.append((.5, fy))
+            else:
+                form += [(.28, fy), (.72, fy)]
+        form = form[:count]
+        D = int(min(.30 * W, (ay1 - ay0) / rows * 0.60))
+    Lh = int(D * 0.52)
+    pts = []
+    for fx, fy in form:
+        cx = ax0 + fx * (ax1 - ax0)
+        cy = ay0 + fy * (ay1 - ay0) - Lh * 0.5
+        pts.append((int(cx), int(cy)))
+    return pts, D, Lh
+
+
+def build_team_segment(scene_index, card, member_imgs, audio_path, duration, voice_len, tmp, segment_path):
+    """v89: a team line-up card (football formation). Empty position circles are shown; the members already introduced stand in
+    place and the new member flies into his circle while the voice says the name."""
+    from PIL import Image, ImageDraw, ImageFilter
+    import math
+    W, H = WIDTH, HEIGHT
+    land = W >= H
+    S = (W / 1920.0) if land else (W / 1080.0)
+    members = card.get("members") or []
+    idx = int(card.get("idx") or 0)
+    count = max(1, min(6, len(members)))
+    title = str(card.get("team_title") or "OUR TEAM").strip().upper()
+    pts, D, Lh = _team_slots(count, W, H, land)
+    bg = Image.new("RGB", (W, H), (9, 16, 40))
+    gd = ImageDraw.Draw(bg)
+    for y in range(0, H, 4):   # soft vertical gradient
+        k = y / float(H); gd.rectangle((0, y, W, y + 4), fill=(int(9 + 10 * k), int(16 + 22 * k), int(40 + 36 * k)))
+    # faint pitch-board lines so it feels like a formation board
+    ln = ImageDraw.Draw(bg, "RGBA")
+    ln.rounded_rectangle((int(W * .04), int(H * .2), int(W * .96), int(H * .97)), radius=int(24 * S), outline=(255, 255, 255, 38), width=max(2, int(3 * S)))
+    ln.line((int(W * .04), int(H * .585), int(W * .96), int(H * .585)), fill=(255, 255, 255, 26), width=max(2, int(2 * S))) if land else None
+    f_title = _ov_font(int((70 if land else 62) * S)); f_name = _ov_font(int(D * 0.17)); f_role = _ov_font(int(D * 0.115)); f_num = _ov_font(int(D * 0.3))
+    SSX = 3
+    mask = Image.new("L", (D * SSX, D * SSX), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, D * SSX - 1, D * SSX - 1), fill=255)
+    mask = mask.resize((D, D), Image.LANCZOS)
+    ring_w = max(5, int(D * 0.035)); pad = ring_w + int(5 * S)
+    names = [str(m.get("name") or "").strip() for m in members][:count]
+    roles = [str(m.get("role") or "").strip().upper() for m in members][:count]
+    # portraits: a photo link wins, otherwise the AI portrait made for that member
+    pics = []
+    for j in range(count):
+        im = None
+        if j <= idx:
+            purl = str((members[j] or {}).get("photo") or "").strip()
+            if purl:
+                try:
+                    pp = os.path.join(tmp, f"team_{scene_index:03d}_{j}.img"); download(purl, pp)
+                    im = _square_portrait(pp, D)
+                except Exception as e:
+                    print(f"::warning::team photo not loaded ({str(e)[:100]})")
+            if im is None and j < len(member_imgs) and member_imgs[j] and os.path.exists(member_imgs[j]):
+                im = _square_portrait(member_imgs[j], D)
+            if im is None:
+                im = Image.new("RGB", (D, D), (24, 48, 96)); dd0 = ImageDraw.Draw(im)
+                ini = "".join(w_[0] for w_ in names[j].upper().split()[:2]) or "?"; fi = _ov_font(int(D * 0.4)); dd0.text(((D - dd0.textlength(ini, font=fi)) / 2, D * 0.28), ini, font=fi, fill=(255, 255, 255))
+        pics.append(im)
+    def dashed(dd, cx, cy, r, a):
+        for k in range(24):
+            dd.arc((cx - r, cy - r, cx + r, cy + r), k * 15, k * 15 + 8, fill=(255, 255, 255, a), width=max(3, int(4 * S)))
+    def label(dd, j, cx, cy, a):
+        nm = names[j].upper(); rl = roles[j]
+        wn = dd.textlength(nm, font=f_name); wr = dd.textlength(rl, font=f_role)
+        y0 = cy + D // 2 + pad + int(8 * S)
+        dd.text((cx - wn / 2 + 2, y0 + 2), nm, font=f_name, fill=(0, 0, 0, int(190 * a)))
+        dd.text((cx - wn / 2, y0), nm, font=f_name, fill=(255, 255, 255, int(255 * a)))
+        cw, ch = wr + 30 * S, f_role.size + 14 * S
+        yy = y0 + f_name.size * 1.2
+        dd.rounded_rectangle((cx - cw / 2, yy, cx + cw / 2, yy + ch), radius=int(ch / 2), fill=QUIZ_ACCENT + (int(255 * a),))
+        if a > 0.8:
+            dd.text((cx - wr / 2, yy + 5 * S), rl, font=f_role, fill=(20, 20, 30))
+    # static layer: empty circles for the places still to fill, and the members already introduced
+    base = bg.copy(); bd = ImageDraw.Draw(base, "RGBA")
+    for j in range(count):
+        cx, cy = pts[j]
+        if j > idx:
+            dashed(bd, cx, cy, D // 2, 70)
+            tn = str(j + 1); tw = bd.textlength(tn, font=f_num); bd.text((cx - tw / 2, cy - f_num.size * 0.55), tn, font=f_num, fill=(255, 255, 255, 40))
+        elif j < idx:
+            base.paste(pics[j], (cx - D // 2, cy - D // 2), mask)
+            bd.ellipse((cx - D // 2 - pad, cy - D // 2 - pad, cx + D // 2 + pad, cy + D // 2 + pad), outline=QUIZ_ACCENT + (255,), width=ring_w)
+            label(bd, j, cx, cy, 1.0)
+    t_title, t_fly, t_ring, t_lab = 0.10, 0.35, 1.05, 1.35
+    aud = _staff_whoosh_audio(audio_path, duration, [t_fly, t_lab], tmp, f"t{scene_index:03d}")
+    ease = lambda x: 1 - (1 - min(max(x, 0), 1)) ** 3
+    NF = max(int(round(duration * FPS)), 2)
+    cmd = ["ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-", "-i", aud,
+           "-vf", f"fade=t=in:st=0:d=0.3,fade=t=out:st={max(duration - 0.35, 0):.3f}:d=0.35,format=yuv420p",
+           "-af", f"afade=t=in:st=0:d=0.05,afade=t=out:st={max(duration - 0.3, 0):.3f}:d=0.3,apad",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", str(VIDEO_CRF), "-maxrate", VIDEO_MAXRATE, "-bufsize", "12M",
+           "-pix_fmt", "yuv420p", "-r", str(FPS), "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", "-t", f"{duration:.3f}", segment_path]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    cx, cy = pts[idx]
+    try:
+        for fi in range(NF):
+            t = fi / FPS
+            im = base.copy(); dd = ImageDraw.Draw(im, "RGBA")
+            # title with a growing underline
+            te = 1.0 if idx > 0 else ease((t - t_title) / 0.6)
+            if te > 0:
+                tw = dd.textlength(title, font=f_title); ty = int(H * 0.065 + (1 - te) * 30 * S)
+                dd.text(((W - tw) / 2 + 3, ty + 3), title, font=f_title, fill=(0, 0, 0, int(180 * te)))
+                dd.text(((W - tw) / 2, ty), title, font=f_title, fill=(255, 255, 255, int(255 * te)))
+                ue = 1.0 if idx > 0 else ease((t - t_title - 0.25) / 0.5)
+                dd.rectangle(((W - tw * 0.5 * ue) / 2 if False else (W / 2 - tw * 0.3 * ue), ty + int(f_title.size * 1.25), (W / 2 + tw * 0.3 * ue), ty + int(f_title.size * 1.25) + int(6 * S)), fill=QUIZ_ACCENT + (255,))
+            # the new member flies into his circle
+            pe = ease((t - t_fly) / 0.7)
+            if pe > 0:
+                sx = W + D if land else cx
+                sy = cy if land else H + D
+                px = int(sx + (cx - sx) * pe); py = int(sy + (cy - sy) * pe)
+                fl = math.sin(t * 2.0) * 4 * S if t > t_fly + 0.7 else 0
+                sc = 0.75 + 0.25 * pe
+                dsz = max(8, int(D * sc))
+                pic = pics[idx].resize((dsz, dsz), Image.LANCZOS); mk = mask.resize((dsz, dsz), Image.LANCZOS)
+                im.paste(pic, (int(px - dsz / 2), int(py + fl - dsz / 2)), mk)
+                if pe >= 1.0:
+                    re_ = ease((t - t_ring) / 0.6)
+                    box = (cx - D // 2 - pad, cy + fl - D // 2 - pad, cx + D // 2 + pad, cy + fl + D // 2 + pad)
+                    if re_ > 0:
+                        dd.arc(box, -90, -90 + 360 * re_, fill=QUIZ_ACCENT + (255,), width=ring_w)
+                    # a quick light flash as he lands
+                    fz = (t - (t_fly + 0.7)) / 0.35
+                    if 0 <= fz < 1:
+                        r2 = int(D * (0.5 + 0.35 * fz)); dd.ellipse((cx - r2, cy - r2, cx + r2, cy + r2), outline=(255, 255, 255, int(150 * (1 - fz))), width=max(2, int(4 * S)))
+            le = ease((t - t_lab) / 0.5)
+            if le > 0:
+                lay = Image.new("RGBA", (W, H), (0, 0, 0, 0)); ld = ImageDraw.Draw(lay)
+                label(ld, idx, cx, int(cy + (1 - le) * 25 * S), le)
+                im.paste(lay, (0, 0), lay)
+            proc.stdin.write(im.tobytes())
+        proc.stdin.close()
+        if proc.wait() != 0:
+            raise RuntimeError("ffmpeg failed")
+    except Exception:
+        try: proc.kill()
+        except Exception: pass
+        raise
+    print(f"scene {scene_index}: team line-up {title} {idx + 1}/{count} {names[idx] if idx < len(names) else ''} {duration:.1f}s")
+
+
+
 def build_staff_segment(scene_index, card, image_path, audio_path, duration, voice_len, tmp, segment_path):
     """v88: a staff introduction card. The photo slides in and gets a ring, the name rises, the position pops. Photo comes from the script's link."""
     from PIL import Image, ImageDraw, ImageFilter
@@ -3763,6 +3937,8 @@ def build_staff_segment(scene_index, card, image_path, audio_path, duration, voi
             portrait = im
         except Exception as e:
             print(f"::warning::staff photo not loaded ({str(e)[:120]}) - showing initials")
+    if portrait is None and card.get("portrait_scene") and image_path and os.path.exists(image_path):
+        portrait = _square_portrait(image_path, D)
     if portrait is None:
         portrait = Image.new("RGB", (D, D), (24, 48, 96))
         dd = ImageDraw.Draw(portrait)
@@ -4779,6 +4955,22 @@ def main():
                         elif ph == "staff":
                             qdur = max(voice_len + 1.6, 4.0)
                             build_staff_segment(i, card, qimg, scene_audio_path, qdur, voice_len, tmp, segment_path)
+                        elif ph == "team":
+                            qdur = max(voice_len + 1.4, 4.0)
+                            mimgs = []
+                            for j in range(int(card.get("idx") or 0) + 1):
+                                pth = ""
+                                for sc2 in scenes:
+                                    c2 = sc2.get("quiz_card") or {}
+                                    if c2.get("phase") == "team" and c2.get("team_id") == card.get("team_id") and int(c2.get("idx") or 0) == j:
+                                        nn = int(sc2["scene_number"]); u2 = image_by_scene.get(nn)
+                                        pth = os.path.join(tmp, f"s{nn}.png")
+                                        if u2 and not os.path.exists(pth):
+                                            try: download(u2, pth)
+                                            except Exception: pth = ""
+                                        break
+                                mimgs.append(pth if pth and os.path.exists(pth) else "")
+                            build_team_segment(i, card, mimgs, scene_audio_path, qdur, voice_len, tmp, segment_path)
                         else:
                             build_quiz_segment(i, card, qimg, scene_audio_path, qdur, voice_len, tmp, segment_path)
                         duration = qdur
