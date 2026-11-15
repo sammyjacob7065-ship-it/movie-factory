@@ -2481,10 +2481,23 @@ def _word_list_for(audio_path, text):
     return out
 
 
+_SHORT_STOP = {"the", "and", "for", "you", "are", "our", "all", "but", "not", "can", "has", "was", "his", "her", "its", "who", "how", "why", "out", "one", "two", "any", "now", "new", "may", "get", "use"}
+
+
 def _word_time_for(words, text):
+    toks = []
     for tok in re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", text or ""):
-        tl = re.sub(r"[^a-z0-9']", "", tok.lower())
-        if len(tl) < 4:
+        tl = re.sub(r"[^a-z0-9'\-]", "", tok.lower()).strip("-")
+        if len(tl) >= 4 or (len(tl) == 3 and tl not in _SHORT_STOP):    # v90: short real words (bar, gym, spa) now count, so they no longer fall back to guessed timing
+            toks.append(tl)
+    for tl in toks:
+        if "-" in tl:                                   # v90: "check-out" must not fire on "check-in": match the whole hyphenated word in order
+            parts = [x for x in tl.split("-") if x]
+            for i in range(len(words)):
+                if all(i + j < len(words) and words[i + j][0] == parts[j] for j in range(len(parts))):
+                    return words[i][1]
+                if words[i][0] == tl:
+                    return words[i][1]
             continue
         for w, t in words:
             if w == tl or (len(tl) >= 5 and (w.startswith(tl[:-1]) or tl.startswith(w[:-1])) and len(w) >= 4):
@@ -2560,7 +2573,7 @@ class _Overlay:
             if words and k in ("type", "pop", "highlight", "spot", "pulse", "flow") and an.get("text"):
                 wt = _word_time_for(words, an["text"])      # v85: appears exactly when the voice says its word
                 if wt is not None:
-                    t0 = min(max(wt - 0.12, 0.2), max(avail - 0.8, 0.3))
+                    t0 = min(max(wt - (0.30 if k in ("spot", "pulse", "flow") else 0.18), 0.1), max(avail - 0.8, 0.3))   # v90: starts just before the word, so it is fully on screen as the voice says it
             if k == "cursor":
                 if dur > 0:
                     st_ = {"t0": t0, "t1": t0 + dur, "a": a, "b": b, "click": None, "double": an.get("double", False)}
@@ -3773,6 +3786,42 @@ def _team_slots(count, W, H, land):
     return pts, D, Lh
 
 
+def _team_fades(idx, count, duration):
+    """v90: inside one team the pictures follow each other with NO fade (the board just keeps building). Only the first member fades in and the last fades out."""
+    f = []
+    if idx == 0:
+        f.append("fade=t=in:st=0:d=0.3")
+    if idx >= count - 1:
+        f.append(f"fade=t=out:st={max(duration - 0.35, 0):.3f}:d=0.35")
+    f.append("format=yuv420p")
+    return ",".join(f)
+
+
+def _team_afades(idx, count, duration):
+    a = ["afade=t=in:st=0:d=0.05"] if idx == 0 else []
+    if idx >= count - 1:
+        a.append(f"afade=t=out:st={max(duration - 0.3, 0):.3f}:d=0.3")
+    a.append("apad")
+    return ",".join(a)
+
+
+def _name_time(card, audio_path, name, default):
+    """v90: the second when the voice says this person's / place's name (exact word timing when available), else the default."""
+    try:
+        txt = str(card.get("say_text") or "")
+        if not txt or not name or not WORD_SYNC:
+            return default
+        words = _word_list_for(audio_path, txt)
+        toks = [t for t in re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", name)]
+        for tk in reversed(toks):                      # the first or last name is the clearest sound
+            wt = _word_time_for(words, tk)
+            if wt is not None:
+                return wt
+    except Exception as e:
+        print(f"::warning::name timing not used ({str(e)[:100]})")
+    return default
+
+
 def build_team_segment(scene_index, card, member_imgs, audio_path, duration, voice_len, tmp, segment_path):
     """v89: a team line-up card (football formation). Empty position circles are shown; the members already introduced stand in
     place and the new member flies into his circle while the voice says the name."""
@@ -3846,12 +3895,15 @@ def build_team_segment(scene_index, card, member_imgs, audio_path, duration, voi
             bd.ellipse((cx - D // 2 - pad, cy - D // 2 - pad, cx + D // 2 + pad, cy + D // 2 + pad), outline=QUIZ_ACCENT + (255,), width=ring_w)
             label(bd, j, cx, cy, 1.0)
     t_title, t_fly, t_ring, t_lab = 0.10, 0.35, 1.05, 1.35
+    _nt = _name_time(card, audio_path, names[idx] if idx < len(names) else "", None)       # v90: he flies in exactly when his name is spoken
+    if _nt is not None:
+        t_fly = min(max(_nt - 0.45, 0.25), max(duration - 2.0, 0.3)); t_ring, t_lab = t_fly + 0.70, t_fly + 1.0
     aud = _staff_whoosh_audio(audio_path, duration, [t_fly, t_lab], tmp, f"t{scene_index:03d}")
     ease = lambda x: 1 - (1 - min(max(x, 0), 1)) ** 3
     NF = max(int(round(duration * FPS)), 2)
     cmd = ["ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-", "-i", aud,
-           "-vf", f"fade=t=in:st=0:d=0.3,fade=t=out:st={max(duration - 0.35, 0):.3f}:d=0.35,format=yuv420p",
-           "-af", f"afade=t=in:st=0:d=0.05,afade=t=out:st={max(duration - 0.3, 0):.3f}:d=0.3,apad",
+           "-vf", _team_fades(idx, count, duration),
+           "-af", _team_afades(idx, count, duration),
            "-c:v", "libx264", "-preset", "veryfast", "-crf", str(VIDEO_CRF), "-maxrate", VIDEO_MAXRATE, "-bufsize", "12M",
            "-pix_fmt", "yuv420p", "-r", str(FPS), "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", "-t", f"{duration:.3f}", segment_path]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -3903,6 +3955,140 @@ def build_team_segment(scene_index, card, member_imgs, audio_path, duration, voi
         raise
     print(f"scene {scene_index}: team line-up {title} {idx + 1}/{count} {names[idx] if idx < len(names) else ''} {duration:.1f}s")
 
+
+
+def _gallery_slots(count, W, H, land):
+    """v90: picture tiles side by side. Returns [(x, y, w, h)] for each tile and the caption height under a tile."""
+    if land:
+        ax0, ax1, ay0, ay1 = 0.06 * W, 0.94 * W, 0.235 * H, 0.95 * H
+        cols = count if count <= 3 else (2 if count == 4 else 3)
+    else:
+        ax0, ax1, ay0, ay1 = 0.07 * W, 0.93 * W, 0.19 * H, 0.96 * H
+        cols = 1 if count <= 2 else 2
+    rows = (count + cols - 1) // cols
+    gap = 0.022 * W
+    capH = int(0.06 * H) if land else int(0.045 * H)
+    tw = (ax1 - ax0 - gap * (cols - 1)) / cols
+    th = min((ay1 - ay0 - gap * (rows - 1) - capH * rows) / rows, tw * (0.68 if land else 0.78))
+    tw, th = int(tw), int(th)
+    tot_h = rows * (th + capH) + (rows - 1) * gap
+    y0 = ay0 + (ay1 - ay0 - tot_h) / 2
+    out = []
+    for i in range(count):
+        r, c = divmod(i, cols)
+        n_in_row = cols if (r < rows - 1) else (count - cols * (rows - 1))
+        row_w = n_in_row * tw + (n_in_row - 1) * gap
+        x = (W - row_w) / 2 + c * (tw + gap) if r == rows - 1 else ax0 + (ax1 - ax0 - (cols * tw + (cols - 1) * gap)) / 2 + c * (tw + gap)
+        out.append((int(x), int(y0 + r * (th + capH + gap)), tw, th))
+    return out, capH
+
+
+def build_gallery_segment(scene_index, card, item_imgs, audio_path, duration, voice_len, tmp, segment_path):
+    """v90: a gallery card (for example the hotel facilities). The picture tiles are shown side by side, one more slides in each time the voice
+    names it. Earlier tiles stay in place; there is no fade between the cards of one gallery."""
+    from PIL import Image, ImageDraw, ImageOps, ImageFilter
+    import math
+    W, H = WIDTH, HEIGHT
+    land = W >= H
+    S = (W / 1920.0) if land else (W / 1080.0)
+    items = card.get("members") or []
+    idx = int(card.get("idx") or 0)
+    count = max(1, min(6, len(items)))
+    title = str(card.get("team_title") or "").strip().upper()
+    slots, capH = _gallery_slots(count, W, H, land)
+    names = [str(m.get("name") or "").strip() for m in items][:count]
+    bg = Image.new("RGB", (W, H), (9, 16, 40)); gd = ImageDraw.Draw(bg)
+    for y in range(0, H, 4):
+        k = y / float(H); gd.rectangle((0, y, W, y + 4), fill=(int(9 + 10 * k), int(16 + 22 * k), int(40 + 36 * k)))
+    f_title = _ov_font(int((66 if land else 58) * S)); f_cap = _ov_font(max(int(capH * 0.52), 14))
+    rad = max(10, int(26 * S))
+    def tile(j):
+        x, y, tw, th = slots[j]
+        im = None
+        if j < len(item_imgs) and item_imgs[j] and os.path.exists(item_imgs[j]):
+            try: im = ImageOps.fit(Image.open(item_imgs[j]).convert("RGB"), (tw, th), Image.LANCZOS, centering=(0.5, 0.5))
+            except Exception as e: print(f"::warning::gallery picture not loaded ({str(e)[:100]})")
+        if im is None:
+            im = Image.new("RGB", (tw, th), (24, 48, 96))
+        m = Image.new("L", (tw * 2, th * 2), 0); ImageDraw.Draw(m).rounded_rectangle((0, 0, tw * 2 - 1, th * 2 - 1), radius=rad * 2, fill=255)
+        return im, m.resize((tw, th), Image.LANCZOS)
+    def caption(dd, j, a, dy=0):
+        x, y, tw, th = slots[j]; nm = names[j].upper(); wn = dd.textlength(nm, font=f_cap)
+        cy = y + th + int(capH * 0.18) + dy
+        dd.text((x + (tw - wn) / 2 + 2, cy + 2), nm, font=f_cap, fill=(0, 0, 0, int(190 * a)))
+        dd.text((x + (tw - wn) / 2, cy), nm, font=f_cap, fill=(255, 255, 255, int(255 * a)))
+        dd.rectangle((x + tw / 2 - wn * 0.25, cy + f_cap.size + int(6 * S), x + tw / 2 + wn * 0.25, cy + f_cap.size + int(6 * S) + max(3, int(4 * S))), fill=QUIZ_ACCENT + (int(255 * a),))
+    tiles = [tile(j) for j in range(idx + 1)]
+    base = bg.copy(); bd = ImageDraw.Draw(base, "RGBA")
+    for j in range(count):
+        x, y, tw, th = slots[j]
+        if j > idx:
+            bd.rounded_rectangle((x, y, x + tw, y + th), radius=rad, outline=(255, 255, 255, 60), width=max(2, int(3 * S)))
+            fn = _ov_font(int(th * 0.3)); tn = str(j + 1); tw_ = bd.textlength(tn, font=fn); bd.text((x + (tw - tw_) / 2, y + th / 2 - fn.size * 0.55), tn, font=fn, fill=(255, 255, 255, 36))
+        elif j < idx:
+            shadow = Image.new("RGBA", (tw + 60, th + 60), (0, 0, 0, 0)); ImageDraw.Draw(shadow).rounded_rectangle((30, 38, tw + 30, th + 38), radius=rad, fill=(0, 0, 0, 120))
+            shadow = shadow.filter(ImageFilter.GaussianBlur(14)); base.paste(shadow, (x - 30, y - 30), shadow)
+            base.paste(tiles[j][0], (x, y), tiles[j][1])
+            bd.rounded_rectangle((x, y, x + tw, y + th), radius=rad, outline=QUIZ_ACCENT + (255,), width=max(3, int(4 * S)))
+            caption(bd, j, 1.0)
+    t_fly, t_cap = 0.35, 1.0
+    _nt = _name_time(card, audio_path, names[idx] if idx < len(names) else "", None)       # the tile slides in as the voice names it
+    if _nt is not None:
+        t_fly = min(max(_nt - 0.45, 0.25), max(duration - 1.8, 0.3)); t_cap = t_fly + 0.65
+    aud = _staff_whoosh_audio(audio_path, duration, [t_fly], tmp, f"g{scene_index:03d}")
+    ease = lambda x: 1 - (1 - min(max(x, 0), 1)) ** 3
+    NF = max(int(round(duration * FPS)), 2)
+    cmd = ["ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-", "-i", aud,
+           "-vf", _team_fades(idx, count, duration), "-af", _team_afades(idx, count, duration),
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", str(VIDEO_CRF), "-maxrate", VIDEO_MAXRATE, "-bufsize", "12M",
+           "-pix_fmt", "yuv420p", "-r", str(FPS), "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", "-t", f"{duration:.3f}", segment_path]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    x, y, tw, th = slots[idx]
+    try:
+        for fi in range(NF):
+            t = fi / FPS
+            im = base.copy(); dd = ImageDraw.Draw(im, "RGBA")
+            if title:
+                te = 1.0 if idx > 0 else ease((t - 0.1) / 0.6)
+                if te > 0:
+                    tww = dd.textlength(title, font=f_title); ty = int(H * 0.065 + (1 - te) * 30 * S)
+                    dd.text(((W - tww) / 2 + 3, ty + 3), title, font=f_title, fill=(0, 0, 0, int(180 * te)))
+                    dd.text(((W - tww) / 2, ty), title, font=f_title, fill=(255, 255, 255, int(255 * te)))
+                    ue = 1.0 if idx > 0 else ease((t - 0.35) / 0.5)
+                    dd.rectangle((W / 2 - tww * 0.3 * ue, ty + int(f_title.size * 1.25), W / 2 + tww * 0.3 * ue, ty + int(f_title.size * 1.25) + int(6 * S)), fill=QUIZ_ACCENT + (255,))
+            pe = ease((t - t_fly) / 0.7)
+            if pe > 0:
+                side = idx % 3                       # slides in from the left, then right, then below, so it feels alive
+                sx = x - (W * 0.55 if side == 0 else 0) + (W * 0.55 if side == 1 else 0); sy = y + (H * 0.5 if side == 2 else 0)
+                px = int(sx + (x - sx) * pe); py = int(sy + (y - sy) * pe)
+                sc = 0.82 + 0.18 * pe
+                tw2, th2 = max(8, int(tw * sc)), max(8, int(th * sc))
+                pic = tiles[idx][0].resize((tw2, th2), Image.LANCZOS); mk = tiles[idx][1].resize((tw2, th2), Image.LANCZOS)
+                if pe < 0.35: mk = mk.point(lambda v, a=pe / 0.35: int(v * a))
+                ox, oy = px + (tw - tw2) // 2, py + (th - th2) // 2
+                sh = Image.new("RGBA", (tw2 + 60, th2 + 60), (0, 0, 0, 0)); ImageDraw.Draw(sh).rounded_rectangle((30, 38, tw2 + 30, th2 + 38), radius=rad, fill=(0, 0, 0, int(120 * pe)))
+                sh = sh.filter(ImageFilter.GaussianBlur(14)); im.paste(sh, (ox - 30, oy - 30), sh)
+                im.paste(pic, (ox, oy), mk)
+                if pe >= 1.0:
+                    dd.rounded_rectangle((x, y, x + tw, y + th), radius=rad, outline=QUIZ_ACCENT + (255,), width=max(3, int(4 * S)))
+                    fz = (t - (t_fly + 0.7)) / 0.6        # a light streak sweeps over the picture as it lands
+                    if 0 <= fz < 1:
+                        lay = Image.new("RGBA", (tw, th), (0, 0, 0, 0)); ld = ImageDraw.Draw(lay); bx = int(-tw * 0.3 + fz * tw * 1.6)
+                        ld.polygon([(bx, 0), (bx + int(tw * 0.14), 0), (bx + int(tw * 0.14) - int(th * 0.25), th), (bx - int(th * 0.25), th)], fill=(255, 255, 255, 70))
+                        im.paste(lay, (x, y), Image.composite(lay.split()[3], Image.new("L", (tw, th), 0), tiles[idx][1]))
+            le = ease((t - t_cap) / 0.5)
+            if le > 0:
+                lay = Image.new("RGBA", (W, H), (0, 0, 0, 0)); ld = ImageDraw.Draw(lay); caption(ld, idx, le, int((1 - le) * 18 * S))
+                im.paste(lay, (0, 0), lay)
+            proc.stdin.write(im.tobytes())
+        proc.stdin.close()
+        if proc.wait() != 0:
+            raise RuntimeError("ffmpeg failed")
+    except Exception:
+        try: proc.kill()
+        except Exception: pass
+        raise
+    print(f"scene {scene_index}: gallery {title} {idx + 1}/{count} {names[idx] if idx < len(names) else ''} {duration:.1f}s")
 
 
 def build_staff_segment(scene_index, card, image_path, audio_path, duration, voice_len, tmp, segment_path):
@@ -4955,14 +5141,14 @@ def main():
                         elif ph == "staff":
                             qdur = max(voice_len + 1.6, 4.0)
                             build_staff_segment(i, card, qimg, scene_audio_path, qdur, voice_len, tmp, segment_path)
-                        elif ph == "team":
+                        elif ph in ("team", "gallery"):
                             qdur = max(voice_len + 1.4, 4.0)
                             mimgs = []
                             for j in range(int(card.get("idx") or 0) + 1):
                                 pth = ""
                                 for sc2 in scenes:
                                     c2 = sc2.get("quiz_card") or {}
-                                    if c2.get("phase") == "team" and c2.get("team_id") == card.get("team_id") and int(c2.get("idx") or 0) == j:
+                                    if c2.get("phase") == ph and c2.get("team_id") == card.get("team_id") and int(c2.get("idx") or 0) == j:
                                         nn = int(sc2["scene_number"]); u2 = image_by_scene.get(nn)
                                         pth = os.path.join(tmp, f"s{nn}.png")
                                         if u2 and not os.path.exists(pth):
@@ -4970,7 +5156,7 @@ def main():
                                             except Exception: pth = ""
                                         break
                                 mimgs.append(pth if pth and os.path.exists(pth) else "")
-                            build_team_segment(i, card, mimgs, scene_audio_path, qdur, voice_len, tmp, segment_path)
+                            (build_gallery_segment if ph == "gallery" else build_team_segment)(i, card, mimgs, scene_audio_path, qdur, voice_len, tmp, segment_path)
                         else:
                             build_quiz_segment(i, card, qimg, scene_audio_path, qdur, voice_len, tmp, segment_path)
                         duration = qdur
