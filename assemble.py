@@ -710,6 +710,26 @@ def shorts_caption_filters(text, duration, tmp, tag):
             groups.append(cur); cur = []
     if cur:
         groups.append(cur)
+    # v111: never a single orphan word alone on screen ("DAYS", "STORES"): join it to the phrase before it, or share the words
+    # between the two phrases, so every screen reads as a short phrase (the sentence ends and real pauses are kept)
+    _stopped = lambda g: bool(words[g[-1]][1])
+    k = 1
+    while k < len(groups):
+        g = groups[k]
+        prev = groups[k - 1]
+        if len(g) == 1 and not _stopped(prev):
+            if len(prev) < SHORTS_WORDS + 1 and len(layout(prev + g)) <= 2:
+                groups[k - 1] = prev + g
+                del groups[k]
+                continue
+            if len(prev) >= 3:
+                moved = [prev[-1]]
+                groups[k - 1] = prev[:-1]
+                groups[k] = moved + g
+        k += 1
+    if len(groups) >= 2 and len(groups[0]) == 1 and not _stopped(groups[0]) and len(groups[1]) < SHORTS_WORDS + 1 and len(layout(groups[0] + groups[1])) <= 2:
+        groups[1] = groups[0] + groups[1]
+        del groups[0]
     fontfile = os.path.join(tmp, "title_font.otf")
     if not os.path.exists(fontfile):
         fontfile = _title_font_file(tmp)[0]
@@ -3263,12 +3283,11 @@ def build_cinema_segment(scene_index, image_path, audio_path, duration, sub_text
     vf_parts = []
     vf_parts += subtitle_filters(sub_text, duration, tmp, f"s{scene_index:03d}")
     vf_parts += watermark_filter()
-    if is_first:
-        vf_parts.append(f"fade=t=in:st=0:d={FADE_SECONDS}")
+    # v111: the first scene (the hook) starts at full brightness: no fade in from black
     if is_last or (nst is None and plan.get("kind") != "cut"):
         vf_parts.append(f"fade=t=out:st={fade_out_start:.3f}:d={FADE_SECONDS}")
     vf_parts.append("format=yuv420p")
-    af = (f"afade=t=in:st=0:d=0.2,afade=t=out:st={max(duration - 0.25, 0):.3f}:d=0.25,apad")
+    af = (f"afade=t=in:st=0:d={0.02 if is_first else 0.2},afade=t=out:st={max(duration - 0.25, 0):.3f}:d=0.25,apad")   # v111: the hook voice starts at once
     log_path = os.path.join(tmp, f"cin_{scene_index:03d}.log")
     cmd = ["ffmpeg", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{WIDTH}x{HEIGHT}", "-framerate", str(FPS), "-i", "pipe:0",
            "-i", audio_in, "-vf", ",".join(vf_parts), "-af", af,
