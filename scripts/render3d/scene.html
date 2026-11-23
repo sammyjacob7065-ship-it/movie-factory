@@ -1,0 +1,98 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>html,body{margin:0;background:#000;overflow:hidden}canvas{display:block}</style>
+<script type="importmap">{"imports":{"three":"/_three/build/three.module.js","three/addons/":"/_three/examples/jsm/"}}</script>
+</head><body>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+
+const q = new URLSearchParams(location.search);
+const W = +q.get('w') || 1080, H = +q.get('h') || 1920;
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setSize(W, H); renderer.setPixelRatio(1);
+renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.1;
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, W / H, 0.1, 200);
+scene.add(new THREE.HemisphereLight(0xcfe3ff, 0x202030, 1.1));
+const key = new THREE.DirectionalLight(0xffffff, 3.0); key.position.set(4, 6, 5); scene.add(key);
+const rim = new THREE.DirectionalLight(0x88aaff, 2.0); rim.position.set(-5, 3, -4); scene.add(rim);
+
+// background: dark gradient + stars
+function makeBg(c1, c2) {
+  const c = document.createElement('canvas'); c.width = 16; c.height = 256;
+  const g = c.getContext('2d'); const gr = g.createLinearGradient(0, 0, 0, 256);
+  gr.addColorStop(0, c1); gr.addColorStop(1, c2); g.fillStyle = gr; g.fillRect(0, 0, 16, 256);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+scene.background = makeBg(q.get('bg1') || '#05070f', q.get('bg2') || '#1a2340');
+if (q.get('stars') !== '0') {
+  const n = 600, pos = new Float32Array(n * 3);
+  let s = 7; const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < n; i++) { const r = 60, a = rnd() * 6.283, b = Math.acos(2 * rnd() - 1);
+    pos[i*3] = r*Math.sin(b)*Math.cos(a); pos[i*3+1] = r*Math.cos(b); pos[i*3+2] = r*Math.sin(b)*Math.sin(a); }
+  const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  scene.add(new THREE.Points(geo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.25, sizeAttenuation: true })));
+}
+
+const holder = new THREE.Group(); scene.add(holder);
+let cfg = {};
+
+function normalize(obj, size) {
+  const box = new THREE.Box3().setFromObject(obj);
+  const c = box.getCenter(new THREE.Vector3()), sz = box.getSize(new THREE.Vector3());
+  const k = size / Math.max(sz.x, sz.y, sz.z);
+  obj.position.sub(c); const g = new THREE.Group(); g.add(obj); g.scale.setScalar(k); return g;
+}
+
+window.loadModel = async (opts) => {
+  cfg = opts;
+  const url = opts.url;
+  let obj;
+  if (/\.obj$/i.test(url)) {
+    obj = await new OBJLoader().loadAsync(url);
+    const paint = new THREE.MeshPhysicalMaterial({ color: opts.color || '#e8b600', metalness: 0.6, roughness: 0.28, clearcoat: 1, clearcoatRoughness: 0.08 });
+    obj.traverse(m => {
+      if (!m.isMesh) return;
+      const nm = ((m.name || '') + ' ' + (m.parent && m.parent.name || '') + ' ' + (m.material && m.material.name || '')).toLowerCase();
+      if (/glass|window/.test(nm)) m.material = new THREE.MeshPhysicalMaterial({ color: 0x111820, metalness: 0, roughness: 0.05, transmission: 0.0, opacity: 0.55, transparent: true });
+      else if (/tire|tyre|wheel|rubber/.test(nm)) m.material = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.8 });
+      else m.material = paint;
+    });
+  } else {
+    const gltf = await new GLTFLoader().loadAsync(url);
+    obj = gltf.scene;
+    if (opts.color) obj.traverse(m => { if (m.isMesh && m.material && m.material.color && /body|paint|car/i.test(m.material.name || '')) m.material.color.set(opts.color); });
+  }
+  const g = normalize(obj, 2.0);
+  g.rotation.y = THREE.MathUtils.degToRad(+opts.yaw || 0);
+  holder.add(g);
+  return true;
+};
+
+const ease = (x) => x < 0.5 ? 2*x*x : 1 - Math.pow(-2*x + 2, 2) / 2;
+const presets = {
+  // turntable: the object turns one full circle while the camera drifts in
+  spin(t, d) { const u = t / d;
+    holder.rotation.y = ease(u) * Math.PI * 2; holder.position.set(0, 0, 0);
+    camera.position.set(0, 0.7 - 0.2*u, 5.2 - 0.8*u); camera.lookAt(0, 0, 0); },
+  // fly-by: object crosses the frame left to right, banking slightly, camera tracks it
+  flyby(t, d) { const u = t / d, x = -4 + 8*ease(u);
+    holder.position.set(x, 0.1*Math.sin(u*6.28), 0); holder.rotation.set(0, Math.PI/2 + 0.15*Math.sin(u*3.14), 0.08*Math.sin(u*3.14));
+    camera.position.set(x*0.4, 0.6, 5.5); camera.lookAt(x*0.7, 0, 0); },
+  // rise: object climbs upward, camera follows from below (rockets, planes)
+  rise(t, d) { const u = t / d, y = -3 + 7*ease(u);
+    holder.position.set(0, y, 0); holder.rotation.set(0, u*2.2, 0);
+    camera.position.set(0.8, y - 1.2, 5.5); camera.lookAt(0, y + 0.4, 0); },
+  // orbit: camera circles a still object
+  orbit(t, d) { const u = t / d, a = u * Math.PI * 2;
+    holder.rotation.set(0, 0, 0); holder.position.set(0, 0, 0);
+    camera.position.set(Math.sin(a)*5, 0.9, Math.cos(a)*5); camera.lookAt(0, 0, 0); }
+};
+window.renderAt = (t, d) => { (presets[cfg.preset] || presets.spin)(t, d); renderer.render(scene, camera); return true; };
+window.ready = true;
+</script></body></html>

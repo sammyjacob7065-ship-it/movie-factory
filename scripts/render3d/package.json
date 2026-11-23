@@ -1,0 +1,10 @@
+{
+  "name": "render3d",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "dependencies": {
+    "three": "0.169.0",
+    "playwright": "1.48.2"
+  }
+}
