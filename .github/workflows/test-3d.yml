@@ -6,13 +6,16 @@ on:
         description: 'Folder name or file path of the model (part of the name is enough, e.g. CAR Model)'
         default: 'CAR Model'
       preset:
-        description: 'spin | flyby | rise | orbit'
+        description: 'spin | flyby | rise | orbit | drive'
         default: 'spin'
       seconds:
         default: '4'
       color:
         description: 'paint colour for OBJ models'
         default: '#e8b600'
+      env:
+        description: 'space | road | runway | sea | studio'
+        default: 'road'
       yaw:
         description: 'turn the model if it faces the wrong way (0, 90, 180, 270)'
         default: '0'
@@ -39,7 +42,7 @@ jobs:
           echo "f=$f" >> "$GITHUB_OUTPUT"
       - name: Render
         working-directory: scripts/render3d
-        run: node render.js "../../${{ steps.find.outputs.f }}" ../../test3d.mp4 "${{ inputs.preset }}" "${{ inputs.seconds }}" "${{ inputs.color }}" "${{ inputs.yaw }}"
+        run: node render.js "../../${{ steps.find.outputs.f }}" ../../test3d.mp4 "${{ inputs.preset }}" "${{ inputs.seconds }}" "${{ inputs.color }}" "${{ inputs.yaw }}" "${{ inputs.env }}"
       - uses: actions/upload-artifact@v4
         with:
           name: test3d
