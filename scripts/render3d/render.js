@@ -18,7 +18,10 @@ const server = http.createServer((req, res) => {
   const port = server.address().port, FPS = 30, N = Math.round(+secs * FPS);
   const browser = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--enable-webgl'] });
   const page = await browser.newPage({ viewport: { width: +w, height: +h } });
-  page.on('console', m => console.log('[page]', m.text())); page.on('pageerror', e => console.error('[pageerror]', e.message));
+    page.on('console', m => console.log('[page]', m.type(), m.text())); page.on('pageerror', e => console.error('[pageerror]', e.message, e.stack));
+  page.on('requestfailed', r => console.log('[requestfailed]', r.url(), r.failure() && r.failure().errorText));
+  page.on('response', r => { if (r.status() >= 400) console.log('[http ' + r.status() + ']', r.url()); });
+  page.on('request', r => console.log('[request]', r.url()));
   await page.goto(`http://127.0.0.1:${port}/?w=${w}&h=${h}&env=${env}`);
   await page.waitForFunction('window.ready === true', null, { timeout: 60000 });
   const rel = '/' + path.relative(ROOT, path.resolve(model)).split(path.sep).map(encodeURIComponent).join('/');
