@@ -1,0 +1,172 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>html,body{margin:0;background:#000;overflow:hidden}canvas{display:block}</style>
+<script type="importmap">{"imports":{"three":"/_three/build/three.module.js","three/addons/":"/_three/examples/jsm/"}}</script>
+</head><body>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+
+const q = new URLSearchParams(location.search);
+const W = +q.get('w') || 1080, H = +q.get('h') || 1920;
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setSize(W, H); renderer.setPixelRatio(1);
+renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.1;
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, W / H, 0.1, 400);
+const hemi = new THREE.HemisphereLight(0xcfe3ff, 0x202030, 1.1); scene.add(hemi);
+const key = new THREE.DirectionalLight(0xffffff, 3.0); key.position.set(4, 6, 5); scene.add(key);
+const rim = new THREE.DirectionalLight(0x88aaff, 2.0); rim.position.set(-5, 3, -4); scene.add(rim);
+
+// ---------- environments: space | road | runway | sea | studio ----------
+const ENV = {
+  space:  { bg1:'#05070f', bg2:'#1a2340', ground:null,      stars:true,  fog:null },
+  road:   { bg1:'#6fa8dc', bg2:'#f6d5a8', ground:'road',    stars:false, fog:'#e9c9a0', sun:0xffe2b8, fogNear:14, fogFar:90 },
+  runway: { bg1:'#7fb2ee', bg2:'#e8f3ff', ground:'road',    stars:false, fog:'#cfe3f7', sun:0xffffff, fogNear:14, fogFar:90 },
+  sea:    { bg1:'#8fc3ff', bg2:'#dff0ff', ground:'water',   stars:false, fog:'#a9d0f0', sun:0xffffff, fogNear:10, fogFar:70 },
+  studio: { bg1:'#2a2f3a', bg2:'#0b0d12', ground:'studio',  stars:false, fog:null }
+};
+const E = Object.assign({}, ENV[q.get('env')] || ENV.space);
+function makeBg(c1, c2) {
+  const c = document.createElement('canvas'); c.width = 16; c.height = 256;
+  const g = c.getContext('2d'); const gr = g.createLinearGradient(0, 0, 0, 256);
+  gr.addColorStop(0, c1); gr.addColorStop(1, c2); g.fillStyle = gr; g.fillRect(0, 0, 16, 256);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+scene.background = makeBg(q.get('bg1') || E.bg1, q.get('bg2') || E.bg2);
+if (E.fog) scene.fog = new THREE.Fog(E.fog, E.fogNear || 8, E.fogFar || 40);
+if (E.sun) key.color.set(E.sun);
+if (E.stars) {
+  const n = 600, pos = new Float32Array(n * 3);
+  let s = 7; const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < n; i++) { const r = 60, a = rnd() * 6.283, b = Math.acos(2 * rnd() - 1);
+    pos[i*3] = r*Math.sin(b)*Math.cos(a); pos[i*3+1] = r*Math.cos(b); pos[i*3+2] = r*Math.sin(b)*Math.sin(a); }
+  const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  scene.add(new THREE.Points(geo, new THREE.PointsMaterial({ color: 0xffffff, size: 0.25, sizeAttenuation: true })));
+}
+
+// ---------- ground ----------
+let rnd2 = 11; const R = () => (rnd2 = (rnd2 * 16807) % 2147483647) / 2147483647;
+function noiseCanvas(w, h, base, spread, speck) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h; const g = c.getContext('2d');
+  g.fillStyle = base; g.fillRect(0, 0, w, h);
+  const img = g.getImageData(0, 0, w, h);
+  for (let i = 0; i < img.data.length; i += 4) { const n = (R() - 0.5) * spread; img.data[i] += n; img.data[i+1] += n; img.data[i+2] += n; }
+  g.putImageData(img, 0, 0);
+  for (let i = 0; i < speck; i++) { g.fillStyle = `rgba(${R()<0.5?255:0},${R()<0.5?255:0},${R()<0.5?255:0},0.07)`; g.fillRect(R()*w, R()*h, 1 + R()*3, 1 + R()*3); }
+  return c;
+}
+let groundMesh = null, roadTex = null;
+const ROAD_W = 5.2, TILE = 8;      // road width and length of one texture tile, in world units
+const GG = new THREE.Group(); scene.add(GG);   // all ground pieces live here so they move together
+function buildGround() {
+  if (!E.ground) return;
+  if (E.ground === 'road') {
+    // verge (grass / dirt) under everything
+    const vt = new THREE.CanvasTexture(noiseCanvas(256, 256, '#4b5a35', 50, 900)); vt.wrapS = vt.wrapT = THREE.RepeatWrapping; vt.repeat.set(60, 60); vt.colorSpace = THREE.SRGBColorSpace;
+    const verge = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), new THREE.MeshStandardMaterial({ map: vt, roughness: 1 }));
+    verge.rotation.x = -Math.PI / 2; verge.position.y = -0.02; verge.receiveShadow = true; GG.add(verge);
+    // asphalt with lane lines: one tile = TILE units long (x) and ROAD_W wide (z)
+    const cw = 1024, ch = 512, c = noiseCanvas(cw, ch, '#3b3d42', 38, 2500), g = c.getContext('2d');
+    const px = ch / ROAD_W;                         // pixels per world unit across the road
+    g.fillStyle = 'rgba(240,240,235,0.92)';
+    g.fillRect(0, 0.28 * px, cw, 0.12 * px); g.fillRect(0, ch - 0.40 * px, cw, 0.12 * px);       // solid edge lines
+    g.fillStyle = 'rgba(245,200,60,0.95)';
+    g.fillRect(0, ch / 2 - 0.06 * px, cw * 0.375, 0.12 * px);                                      // dashed centre line (3 of 8 units)
+    g.fillStyle = 'rgba(0,0,0,0.10)'; g.fillRect(0, ch * 0.30, cw, ch * 0.12); g.fillRect(0, ch * 0.62, cw, ch * 0.12);  // darker wheel tracks
+    roadTex = new THREE.CanvasTexture(c); roadTex.wrapS = roadTex.wrapT = THREE.RepeatWrapping; roadTex.repeat.set(600 / TILE, 1);
+    roadTex.colorSpace = THREE.SRGBColorSpace; roadTex.anisotropy = 8;
+    groundMesh = new THREE.Mesh(new THREE.PlaneGeometry(600, ROAD_W), new THREE.MeshStandardMaterial({ map: roadTex, roughness: 0.78, metalness: 0.05 }));
+    groundMesh.rotation.x = -Math.PI / 2; groundMesh.receiveShadow = true; GG.add(groundMesh);
+    // kerbs
+    for (const s of [-1, 1]) { const k = new THREE.Mesh(new THREE.BoxGeometry(600, 0.08, 0.18), new THREE.MeshStandardMaterial({ color: 0x9a9a95, roughness: 0.9 }));
+      k.position.set(0, 0.03, s * (ROAD_W / 2 + 0.09)); k.receiveShadow = true; GG.add(k); }
+    // roadside poles + a few trees so the speed reads
+    for (let i = -20; i <= 20; i++) { const x = i * 6;
+      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, 2.6, 8), new THREE.MeshStandardMaterial({ color: 0x555a60 })); pole.position.set(x, 1.3, -ROAD_W / 2 - 0.9); pole.castShadow = true; GG.add(pole);
+      if (i % 2 === 0) { const t = new THREE.Mesh(new THREE.ConeGeometry(0.7, 2.2, 7), new THREE.MeshStandardMaterial({ color: 0x2f4a2c, roughness: 1 })); t.position.set(x + 2, 1.1, ROAD_W / 2 + 3 + (i % 4)); t.castShadow = true; GG.add(t); } }
+  } else if (E.ground === 'water') {
+    groundMesh = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), new THREE.MeshStandardMaterial({ color: '#0e4a7a', roughness: 0.15, metalness: 0.6 }));
+    groundMesh.rotation.x = -Math.PI / 2; GG.add(groundMesh);
+  } else {
+    groundMesh = new THREE.Mesh(new THREE.CircleGeometry(30, 64), new THREE.MeshStandardMaterial({ color: '#161920', roughness: 0.35, metalness: 0.4 }));
+    groundMesh.rotation.x = -Math.PI / 2; groundMesh.receiveShadow = true; GG.add(groundMesh);
+  }
+}
+buildGround();
+key.castShadow = true; key.shadow.mapSize.set(2048, 2048);
+Object.assign(key.shadow.camera, { left: -8, right: 8, top: 8, bottom: -8, near: 0.5, far: 40 });
+key.shadow.bias = -0.0005;
+
+// ---------- models (one or more) ----------
+const items = [];                  // each: { holder }
+let cfg = {};
+function normalize(obj, size) {
+  const box = new THREE.Box3().setFromObject(obj);
+  const c = box.getCenter(new THREE.Vector3()), sz = box.getSize(new THREE.Vector3());
+  const k = size / Math.max(sz.x, sz.y, sz.z);
+  obj.position.sub(c); const g = new THREE.Group(); g.add(obj); g.scale.setScalar(k); return g;
+}
+window.loadModel = async (opts) => {
+  cfg = Object.assign(cfg, { preset: opts.preset });
+  const url = opts.url;
+  let obj;
+  if (/\.obj$/i.test(url)) {
+    obj = await new OBJLoader().loadAsync(url);
+    const paint = new THREE.MeshPhysicalMaterial({ color: opts.color || '#e8b600', metalness: 0.6, roughness: 0.28, clearcoat: 1, clearcoatRoughness: 0.08 });
+    obj.traverse(m => {
+      if (!m.isMesh) return;
+      const nm = ((m.name || '') + ' ' + (m.parent && m.parent.name || '') + ' ' + (m.material && m.material.name || '')).toLowerCase();
+      if (/glass|window/.test(nm)) m.material = new THREE.MeshPhysicalMaterial({ color: 0x111820, metalness: 0, roughness: 0.05, opacity: 0.55, transparent: true });
+      else if (/tire|tyre|wheel|rubber/.test(nm)) m.material = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.8 });
+      else m.material = paint;
+    });
+  } else {
+    const gltf = await new GLTFLoader().loadAsync(url);
+    obj = gltf.scene;
+    if (opts.color) obj.traverse(m => { if (m.isMesh && m.material && m.material.color && /body|paint|car/i.test(m.material.name || '')) m.material.color.set(opts.color); });
+  }
+  obj.traverse(m => { if (m.isMesh) { m.castShadow = true; m.receiveShadow = false; } });
+  const g = normalize(obj, 2.0);
+  g.rotation.y = THREE.MathUtils.degToRad(+opts.yaw || 0);
+  const holder = new THREE.Group(); holder.add(g); scene.add(holder);
+  items.push({ holder });
+  if (E.ground && E.ground !== 'water') { const b = new THREE.Box3().setFromObject(g); GG.position.y = Math.min(GG.position.y, b.min.y - 0.001); }
+  return true;
+};
+
+const ease = (x) => x < 0.5 ? 2*x*x : 1 - Math.pow(-2*x + 2, 2) / 2;
+const presets = {
+  spin(t, d, [a]) { const u = t / d;
+    a.holder.rotation.y = ease(u) * Math.PI * 2; a.holder.position.set(0, 0, 0);
+    camera.position.set(0, 0.7 - 0.2*u, 5.2 - 0.8*u); camera.lookAt(0, 0, 0); },
+  flyby(t, d, [a]) { const u = t / d, x = -4 + 8*ease(u);
+    a.holder.position.set(x, 0.1*Math.sin(u*6.28), 0); a.holder.rotation.set(0, Math.PI/2 + 0.15*Math.sin(u*3.14), 0.08*Math.sin(u*3.14));
+    camera.position.set(x*0.4, 0.6, 5.5); camera.lookAt(x*0.7, 0, 0); },
+  rise(t, d, [a]) { const u = t / d, y = -3 + 7*ease(u);
+    a.holder.position.set(0, y, 0); a.holder.rotation.set(0, u*2.2, 0);
+    camera.position.set(0.8, y - 1.2, 5.5); camera.lookAt(0, y + 0.4, 0); },
+  // drive: the car stays in place, the road scrolls under it, the camera sweeps from the side to the front
+  drive(t, d, [a]) { const u = t / d, ang = -0.9 + 1.4*ease(u);
+    a.holder.rotation.set(0, Math.PI/2, 0); a.holder.position.set(0, 0, 0);
+    if (roadTex) roadTex.offset.x = t * 7 / TILE;
+    camera.position.set(Math.sin(ang)*5.2, 0.55 + 0.4*u, Math.cos(ang)*5.2); camera.lookAt(0, 0.35, 0); },
+  // race: two (or more) cars side by side on the road, one pulls ahead, camera runs ahead of them looking back
+  race(t, d, all) { const u = t / d; const n = all.length;
+    all.forEach((it, i) => { const lane = (i - (n - 1) / 2) * 1.35;
+      const lead = (i === 0 ? 1 : -1) * 0.9 * ease(u);                    // first car pulls ahead
+      it.holder.rotation.set(0, Math.PI/2 + 0.01*Math.sin(t*9 + i), 0);
+      it.holder.position.set(-2 + 7*ease(u) + lead, 0.004*Math.sin(t*30 + i), lane); });
+    const mx = -2 + 7*ease(u);
+    camera.position.set(mx + 4.6 - 1.2*u, 0.45 + 0.35*u, 2.6 + 1.2*Math.sin(u*3.14)); camera.lookAt(mx, 0.3, 0); },
+  orbit(t, d, [a]) { const u = t / d, ang = u * Math.PI * 2;
+    a.holder.rotation.set(0, 0, 0); a.holder.position.set(0, 0, 0);
+    camera.position.set(Math.sin(ang)*5, 0.9, Math.cos(ang)*5); camera.lookAt(0, 0, 0); }
+};
+window.renderAt = (t, d) => { (presets[cfg.preset] || presets.spin)(t, d, items); renderer.render(scene, camera); return true; };
+window.ready = true;
+</script></body></html>
