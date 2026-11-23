@@ -1,7 +1,7 @@
-// usage: node render.js <model file> <out.mp4> [preset=spin] [seconds=5] [color=#e8b600] [yaw=0] [w=1080] [h=1920]
+// usage: node render.js <model file> <out.mp4> [preset=spin] [seconds=5] [color=#e8b600] [yaw=0] [env=space] [w=1080] [h=1920]
 const fs = require('fs'), path = require('path'), http = require('http'), { spawn } = require('child_process');
 const { chromium } = require('playwright');
-const [model, out, preset = 'spin', secs = '5', color = '#e8b600', yaw = '0', w = '1080', h = '1920'] = process.argv.slice(2);
+const [model, out, preset = 'spin', secs = '5', color = '#e8b600', yaw = '0', env = 'space', w = '1080', h = '1920'] = process.argv.slice(2);
 if (!model || !out) { console.error('usage: node render.js <model> <out.mp4> [preset] [seconds] [color] [yaw] [w] [h]'); process.exit(2); }
 const ROOT = path.resolve(__dirname, '../..');            // repo root, so model paths with spaces just work
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.glb': 'model/gltf-binary', '.gltf': 'model/gltf+json', '.obj': 'text/plain', '.bin': 'application/octet-stream' };
@@ -19,7 +19,7 @@ const server = http.createServer((req, res) => {
   const browser = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--enable-webgl'] });
   const page = await browser.newPage({ viewport: { width: +w, height: +h } });
   page.on('console', m => console.log('[page]', m.text())); page.on('pageerror', e => console.error('[pageerror]', e.message));
-  await page.goto(`http://127.0.0.1:${port}/?w=${w}&h=${h}`);
+  await page.goto(`http://127.0.0.1:${port}/?w=${w}&h=${h}&env=${env}`);
   await page.waitForFunction('window.ready === true', null, { timeout: 60000 });
   const rel = '/' + path.relative(ROOT, path.resolve(model)).split(path.sep).map(encodeURIComponent).join('/');
   await page.evaluate(o => window.loadModel(o), { url: rel, preset, color, yaw });
