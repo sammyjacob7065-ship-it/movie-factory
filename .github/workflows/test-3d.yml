@@ -1,0 +1,46 @@
+name: Test 3D render
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 'Folder name or file path of the model (part of the name is enough, e.g. CAR Model)'
+        default: 'CAR Model'
+      preset:
+        description: 'spin | flyby | rise | orbit'
+        default: 'spin'
+      seconds:
+        default: '4'
+      color:
+        description: 'paint colour for OBJ models'
+        default: '#e8b600'
+      yaw:
+        description: 'turn the model if it faces the wrong way (0, 90, 180, 270)'
+        default: '0'
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: Install
+        working-directory: scripts/render3d
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+          sudo apt-get install -y ffmpeg || true
+      - name: Find the model file
+        id: find
+        run: |
+          f=$(find . -path ./node_modules -prune -o -type f \( -iname '*.glb' -o -iname '*.gltf' -o -iname '*.obj' \) -ipath "*${{ inputs.model }}*" -print | grep -v node_modules | sort | head -1)
+          echo "model file: $f"
+          if [ -z "$f" ]; then echo "No model found for '${{ inputs.model }}'"; find . -type f \( -iname '*.glb' -o -iname '*.gltf' -o -iname '*.obj' \) | grep -v node_modules | head -60; exit 1; fi
+          echo "f=$f" >> "$GITHUB_OUTPUT"
+      - name: Render
+        working-directory: scripts/render3d
+        run: node render.js "../../${{ steps.find.outputs.f }}" ../../test3d.mp4 "${{ inputs.preset }}" "${{ inputs.seconds }}" "${{ inputs.color }}" "${{ inputs.yaw }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test3d
+          path: test3d.mp4
