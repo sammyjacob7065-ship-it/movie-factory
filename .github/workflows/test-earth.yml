@@ -1,0 +1,35 @@
+name: Test Earth dive
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        default: '12'
+      lon:
+        description: 'longitude to land on (east is +). 5 = Nigeria'
+        default: '5'
+      lat:
+        description: 'latitude (north is +). 8 = Nigeria'
+        default: '8'
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: Install
+        working-directory: scripts/render3d
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+          sudo apt-get install -y ffmpeg || true
+      - name: Check the Earth picture is there
+        run: ls -la textures/earth_day.jpg
+      - name: Render
+        working-directory: scripts/render3d
+        run: node render_earth.js ../../earth_dive.mp4 "${{ inputs.seconds }}" "${{ inputs.lon }}" "${{ inputs.lat }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: earth_dive
+          path: earth_dive.mp4
