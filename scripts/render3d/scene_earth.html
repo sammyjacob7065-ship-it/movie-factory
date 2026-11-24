@@ -1,0 +1,127 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>html,body{margin:0;background:#000;overflow:hidden}canvas{display:block}</style>
+<script type="importmap">{"imports":{"three":"/_three/build/three.module.js","three/addons/":"/_three/examples/jsm/"}}</script>
+</head><body>
+<script type="module">
+import * as THREE from 'three';
+const q = new URLSearchParams(location.search);
+const W = +q.get('w') || 1080, H = +q.get('h') || 1920;
+const LON = +(q.get('lon') || 5), LAT = +(q.get('lat') || 8);      // where we land (default: Nigeria)
+const TEX = q.get('tex') || '/textures/earth_day.jpg';
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true, logarithmicDepthBuffer: true });
+renderer.setSize(W, H); renderer.setPixelRatio(1);
+renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 1.05;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x000000);
+const camera = new THREE.PerspectiveCamera(42, W / H, 0.00005, 200);
+
+// ---- local frame at the landing point (Earth radius = 1) ----
+const lo = THREE.MathUtils.degToRad(LON), la = THREE.MathUtils.degToRad(LAT);
+const N = new THREE.Vector3(Math.cos(lo)*Math.cos(la), Math.sin(la), -Math.sin(lo)*Math.cos(la));
+const EAST = new THREE.Vector3(-Math.sin(lo), 0, -Math.cos(lo));
+const NORTH = new THREE.Vector3(-Math.cos(lo)*Math.sin(la), Math.cos(la), Math.sin(lo)*Math.sin(la));
+
+// ---- sun ----
+const sunDir = N.clone().multiplyScalar(0.62).addScaledVector(EAST, 0.62).addScaledVector(NORTH, 0.25).normalize();
+const sun = new THREE.DirectionalLight(0xfff4e0, 3.4); sun.position.copy(sunDir.clone().multiplyScalar(50)); scene.add(sun);
+scene.add(new THREE.AmbientLight(0x2a3a60, 0.35));
+
+// ---- stars ----
+{ const n = 2500, pos = new Float32Array(n*3); let s = 5; const r = () => (s = (s*16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < n; i++) { const a = r()*6.283, b = Math.acos(2*r()-1), R = 90; pos[i*3] = R*Math.sin(b)*Math.cos(a); pos[i*3+1] = R*Math.cos(b); pos[i*3+2] = R*Math.sin(b)*Math.sin(a); }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  var stars = new THREE.Points(g, new THREE.PointsMaterial({ color: 0xffffff, size: 0.35, sizeAttenuation: false, transparent: true, opacity: 1 })); scene.add(stars); }
+
+// ---- Earth ----
+const earthMat = new THREE.MeshStandardMaterial({ roughness: 0.92, metalness: 0 });
+const earth = new THREE.Mesh(new THREE.SphereGeometry(1, 256, 128), earthMat); scene.add(earth);
+
+// ---- atmosphere glow (seen from space) ----
+const atmMat = new THREE.ShaderMaterial({
+  uniforms: { k: { value: 1 }, sunDir: { value: sunDir } }, transparent: true, side: THREE.BackSide, blending: THREE.AdditiveBlending, depthWrite: false,
+  vertexShader: 'varying vec3 vN; varying vec3 vW; void main(){ vN = normalize(normalMatrix*normal); vW = (modelMatrix*vec4(position,1.)).xyz; gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.); }',
+  fragmentShader: 'uniform float k; uniform vec3 sunDir; varying vec3 vN; varying vec3 vW; void main(){ float i = pow(max(0.62 - dot(vN, vec3(0.,0.,1.)), 0.), 3.2)*2.4; float lit = clamp(dot(normalize(vW), sunDir)*1.4+0.45, 0., 1.); gl_FragColor = vec4(vec3(0.25,0.55,1.0)*i*lit*k, 1.); }' });
+scene.add(new THREE.Mesh(new THREE.SphereGeometry(1.075, 128, 64), atmMat));
+
+// ---- global cloud shell (procedural noise, lit by the sun) ----
+const shellMat = new THREE.ShaderMaterial({
+  uniforms: { fade: { value: 1 }, sunDir: { value: sunDir } }, transparent: true, depthWrite: false,
+  vertexShader: 'varying vec3 vP; varying vec3 vW; void main(){ vP = position; vW = (modelMatrix*vec4(position,1.)).xyz; gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.); }',
+  fragmentShader: `uniform float fade; uniform vec3 sunDir; varying vec3 vP; varying vec3 vW;
+    float h(vec3 p){ p = fract(p*0.3183099+.1); p *= 17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
+    float nz(vec3 x){ vec3 i = floor(x), f = fract(x); f = f*f*(3.-2.*f);
+      return mix(mix(mix(h(i), h(i+vec3(1,0,0)), f.x), mix(h(i+vec3(0,1,0)), h(i+vec3(1,1,0)), f.x), f.y),
+                 mix(mix(h(i+vec3(0,0,1)), h(i+vec3(1,0,1)), f.x), mix(h(i+vec3(0,1,1)), h(i+vec3(1,1,1)), f.x), f.y), f.z); }
+    float fbm(vec3 p){ float a = .5, s = 0.; for(int i=0;i<6;i++){ s += a*nz(p); p = p*2.03+vec3(1.7,9.2,3.1); a *= .5; } return s; }
+    void main(){ vec3 n = normalize(vP);
+      vec3 w = n*3.2; float base = fbm(w + fbm(w*1.7)*0.9);
+      float band = 0.55 + 0.25*sin(n.y*7.0 + fbm(n*2.0)*3.0);
+      float c = smoothstep(0.50, 0.74, base*band*1.5);
+      float lit = clamp(dot(n, sunDir)*1.3 + 0.15, 0.05, 1.0);
+      gl_FragColor = vec4(vec3(0.96,0.97,1.0)*(0.25+0.85*lit), c*fade*0.92); }` });
+const shell = new THREE.Mesh(new THREE.SphereGeometry(1.010, 256, 128), shellMat); scene.add(shell);
+
+// ---- local cloud layer we actually fly through (soft puffy sprites with lit tops and grey bases) ----
+const sprites = [];
+{ let s = 21; const r = () => (s = (s*16807) % 2147483647) / 2147483647;
+  const mk = (top, bot) => { const c = document.createElement('canvas'); c.width = c.height = 256; const g = c.getContext('2d');
+    for (let i = 0; i < 34; i++) { const x = 128 + (r()-0.5)*120, y = 128 + (r()-0.5)*70, rad = 26 + r()*44;
+      const gr = g.createRadialGradient(x, y - rad*0.25, rad*0.1, x, y, rad);
+      gr.addColorStop(0, top); gr.addColorStop(0.55, bot); gr.addColorStop(1, 'rgba(255,255,255,0)'); g.fillStyle = gr; g.beginPath(); g.arc(x, y, rad, 0, 6.283); g.fill(); }
+    const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t; };
+  const texs = [mk('rgba(255,255,255,0.80)', 'rgba(205,215,232,0.45)'), mk('rgba(255,252,246,0.75)', 'rgba(185,196,216,0.42)'), mk('rgba(250,250,255,0.70)', 'rgba(170,182,206,0.40)')];
+  for (let i = 0; i < 520; i++) {
+    const m = new THREE.SpriteMaterial({ map: texs[i % 3], transparent: true, depthWrite: false, opacity: 0 });
+    const sp = new THREE.Sprite(m); const size = 0.0035 + r()*0.011;
+    const lat = (r()-0.35)*0.10, lon = (r()-0.5)*0.07, rad = 1.0016 + r()*0.0024;
+    sp.position.copy(N).multiplyScalar(rad).addScaledVector(NORTH, lat).addScaledVector(EAST, lon);
+    sp.scale.set(size*1.9, size, 1); sp.userData.base = 0.55 + r()*0.45; scene.add(sp); sprites.push(sp);
+  } }
+
+// white-out veil in front of the lens (the moment inside the cloud)
+const veil = new THREE.Mesh(new THREE.PlaneGeometry(4, 4), new THREE.MeshBasicMaterial({ color: 0xf4f7ff, transparent: true, opacity: 0, depthTest: false, depthWrite: false }));
+veil.position.z = -0.01; veil.renderOrder = 999; camera.add(veil); scene.add(camera);
+
+const sm = (a, b, x) => { const t = Math.min(Math.max((x-a)/(b-a), 0), 1); return t*t*(3-2*t); };
+const ease = (x) => x < 0.5 ? 4*x*x*x : 1 - Math.pow(-2*x + 2, 3)/2;
+const skyTop = new THREE.Color(0x2e6fd0), skyHaze = new THREE.Color(0xbcd6f2);
+
+window.renderAt = (t, d) => {
+  const u = Math.min(Math.max(t/d, 0), 1);
+  // exponential descent: the zoom feels constant, like a real fall; gentle start and end
+  const h0 = 3.2, h1 = 0.0006, uu = 0.04 + 0.92*(0.5 - 0.5*Math.cos(Math.PI*u)) ;   // smooth in and out
+  const h = h0 * Math.pow(h1/h0, uu*(1/0.96) - 0.04/0.96*0 );
+  const r = 1 + h;
+  // sideways drift (parallax) that dies down as we fall
+  const drift = 0.18 * h * Math.sin(u*2.2);
+  camera.position.copy(N).multiplyScalar(r).addScaledVector(EAST, drift).addScaledVector(NORTH, -0.35*h);
+  camera.up.copy(NORTH);
+  // look: first at the planet, later up toward the horizon
+  const pitchK = sm(0.55, 0.97, u);
+  const look = N.clone().multiplyScalar(1.0).addScaledVector(NORTH, 0.0005 + 0.05*pitchK*pitchK).addScaledVector(EAST, 0.0);
+  look.lerp(new THREE.Vector3(0,0,0), 1 - sm(0.0, 0.6, u*1.15) ).add(N.clone().multiplyScalar(0));   // start aimed at the planet centre
+  camera.lookAt(look);
+  camera.near = Math.max(0.00005, h*0.02); camera.updateProjectionMatrix();
+  // atmosphere glow fades once we are inside it, stars fade as the sky turns blue
+  atmMat.uniforms.k.value = sm(0.02, 0.5, h);
+  stars.material.opacity = sm(0.03, 0.4, h);
+  // sky colour from space to blue as we drop below ~300 km
+  const sky = 1 - sm(0.004, 0.09, h);
+  const col = new THREE.Color(0x000000).lerp(skyTop.clone().lerp(skyHaze, 0.25), sky);
+  scene.background = col;
+  // shell fades out as the real cloud layer fades in
+  shellMat.uniforms.fade.value = sm(0.012, 0.07, h);
+  const spr = 1 - sm(0.006, 0.045, h);
+  sprites.forEach(s => { s.material.opacity = spr * s.userData.base; });
+  // white-out peaks while we are inside the layer (h between 0.0038 and 0.0014)
+  const inside = sm(0.0042, 0.0028, h) * (1 - sm(0.0021, 0.0011, h));
+  veil.material.opacity = 0.62 * inside;
+  renderer.render(scene, camera); return true;
+};
+
+new THREE.TextureLoader().load(TEX, (tx) => {
+  tx.colorSpace = THREE.SRGBColorSpace; tx.anisotropy = 16; tx.generateMipmaps = true; tx.minFilter = THREE.LinearMipmapLinearFilter;
+  earthMat.map = tx; earthMat.needsUpdate = true; window.ready = true;
+}, undefined, (e) => { console.error('texture failed ' + TEX); });
+</script></body></html>
