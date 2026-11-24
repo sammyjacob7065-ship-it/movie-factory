@@ -1,0 +1,39 @@
+{
+  "_help": "One entry per thing the writer may ask for. 'folder' = part of the repo folder name. 'verified' = the direction of the model was checked (true) or not (false). An unverified model only uses presets that look right from any direction (spin / orbit). After you run 'Check all 3D models' and a model looks right in 'drive' / 'fly', set verified to true. 'flip' = extra degrees to turn the model if it goes backwards (180).",
+  "models": {
+    "car":         { "folder": "CAR Model",       "alias": ["lamborghini", "sports_car", "supercar"], "vehicle": true,  "paint": true,  "color": "#e8b600", "env": "road",  "preset": "drive", "verified": true,  "flip": 0 },
+    "rolls_royce": { "folder": "Rolls Royce",     "alias": ["rolls", "luxury_car", "limousine"],       "vehicle": true,  "paint": true,  "color": "#14161c", "env": "road",  "preset": "drive", "verified": false, "flip": 0 },
+    "truck":       { "folder": "Truck",           "alias": ["lorry"],                                  "vehicle": true,  "paint": true,  "color": "#c0392b", "env": "road",  "preset": "drive", "verified": false, "flip": 0 },
+    "airplane":    { "folder": "Airplane",        "alias": ["plane", "jet", "aeroplane", "airliner", "private_jet"], "vehicle": true, "paint": false, "env": "sky", "preset": "fly", "verified": false, "flip": 0 },
+    "helicopter":  { "folder": "Helicopter",      "alias": ["chopper"],                                "vehicle": true,  "paint": false, "env": "sky",   "preset": "fly",   "verified": false, "flip": 0 },
+    "missile":     { "folder": "Missile",         "alias": ["rocket_missile"],                         "vehicle": true,  "paint": false, "env": "sky",   "preset": "fly",   "verified": false, "flip": 0 },
+    "rocket":      { "folder": "Rocketship",      "alias": ["rocketship", "spaceship"],                "vehicle": false, "paint": false, "env": "space", "preset": "rise",  "verified": true,  "flip": 0 },
+    "satellite":   { "folder": "Satellite",       "alias": [],                                         "vehicle": false, "paint": false, "env": "space", "preset": "spin",  "verified": true,  "flip": 0 },
+    "cruise_ship": { "folder": "Cruise ship",     "alias": ["ship", "yacht", "superyacht", "boat", "liner"], "vehicle": true, "paint": false, "env": "sea", "preset": "flyby", "verified": false, "flip": 0 },
+    "submarine":   { "folder": "Submarine",       "alias": ["sub"],                                    "vehicle": true,  "paint": false, "env": "sea",   "preset": "flyby", "verified": false, "flip": 0 },
+    "train":       { "folder": "Railway carriage","alias": ["railway", "carriage", "railway_carriage"],"vehicle": true,  "paint": false, "env": "road",  "preset": "drive", "verified": false, "flip": 0 },
+    "earth":       { "folder": "Earth",           "alias": ["planet_earth", "globe"],                  "vehicle": false, "paint": false, "env": "space", "preset": "spin",  "verified": true,  "flip": 0 },
+    "moon":        { "folder": "Moon",            "alias": [],                                         "vehicle": false, "paint": false, "env": "space", "preset": "spin",  "verified": true,  "flip": 0 },
+    "mars":        { "folder": "Mars",            "alias": [],                                         "vehicle": false, "paint": false, "env": "space", "preset": "spin",  "verified": true,  "flip": 0 },
+    "jupiter":     { "folder": "Jupiter",         "alias": [],                                         "vehicle": false, "paint": false, "env": "space", "preset": "spin",  "verified": true,  "flip": 0 },
+    "saturn":      { "folder": "Saturn",          "alias": [],                                         "vehicle": false, "paint": false, "env": "space", "preset": "spin",  "verified": true,  "flip": 0 },
+    "sun":         { "folder": "Sun",             "alias": ["star"],                                   "vehicle": false, "paint": false, "env": "space", "preset": "spin",  "verified": true,  "flip": 0 },
+    "brain":       { "folder": "Brain",           "alias": [],                                         "vehicle": false, "paint": false, "color": "#d98aa0", "env": "studio", "preset": "spin", "verified": true, "flip": 0 },
+    "heart":       { "folder": "Heart",           "alias": [],                                         "vehicle": false, "paint": false, "env": "studio", "preset": "spin",  "verified": true,  "flip": 0 },
+    "skeleton":    { "folder": "lkn",             "alias": ["skull", "bones", "human_skeleton"],       "vehicle": false, "paint": false, "color": "#e8e4d8", "env": "studio", "preset": "spin", "verified": true, "flip": 0 },
+    "astronaut":   { "folder": "Astronaut",       "alias": ["spaceman"],                               "vehicle": false, "paint": false, "env": "space", "preset": "spin",  "verified": true,  "flip": 0 },
+    "bullet":      { "folder": "Bullet",          "alias": [],                                         "vehicle": false, "paint": false, "color": "#c8a24a", "env": "studio", "preset": "spin", "verified": true, "flip": 0 },
+    "coin":        { "folder": "Coin",            "alias": ["gold_coin"],                              "vehicle": false, "paint": false, "color": "#e6b800", "env": "studio", "preset": "spin", "verified": true, "flip": 0 },
+    "football":    { "folder": "Football",        "alias": ["soccer_ball", "ball"],                    "vehicle": false, "paint": false, "env": "studio", "preset": "spin",  "verified": true,  "flip": 0 },
+    "phone":       { "folder": "Phone",           "alias": ["smartphone", "mobile"],                   "vehicle": false, "paint": false, "env": "studio", "preset": "spin",  "verified": true,  "flip": 0 },
+    "t_shirt":     { "folder": "T-shirt",         "alias": ["shirt", "tshirt"],                        "vehicle": false, "paint": false, "env": "studio", "preset": "spin",  "verified": true,  "flip": 0 },
+    "clouds":      { "folder": "Clouds",          "alias": ["cloud"],                                  "vehicle": false, "paint": false, "env": "sky",   "preset": "spin",  "verified": true,  "flip": 0 }
+  },
+  "presets": ["spin", "orbit", "flyby", "rise", "drive", "race", "fly", "climb"],
+  "envs": ["space", "road", "runway", "sea", "studio", "sky"],
+  "directional": ["drive", "race", "fly", "climb", "flyby"],
+  "credits": {
+    "_help": "Credit lines for the YouTube description. Fill in the author and licence from each Poly Pizza page. Only the models used in a video are listed.",
+    "car": "Lamborghini model by Ignition Labs via Poly Pizza (CC BY)"
+  }
+}
