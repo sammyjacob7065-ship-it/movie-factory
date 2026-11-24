@@ -147,6 +147,10 @@ def run(cmd):
 
 
 def download(url, dest):
+    if os.path.exists(str(url)):                 # v112: a clip rendered on this machine (3D scenes) is a file path, not a link
+        if os.path.abspath(str(url)) != os.path.abspath(dest):
+            shutil.copyfile(str(url), dest)
+        return
     r = requests.get(url, timeout=60)
     r.raise_for_status()
     with open(dest, "wb") as f:
@@ -943,9 +947,13 @@ def parse_camera(text, idx):
         strength = 0.8
     if re.search(r"\bfast\b|\brapid\w*|\bsudden\w*|\bdramatic\w*|\baccelerat\w*|\baggressive\w*|\bsweep\w*", t):
         strength = 1.3
+    if re.search(r"\bdrone\b", t):              # v112: a drone-style move: the camera travels much further (a real push-in toward the subject)
+        strength = DRONE_STRENGTH
     return moves, strength
 
 
+DRONE_STRENGTH = 2.1      # v112: CAMERA lines that start with the word 'Drone' move this much further than normal (1.0 = normal, 1.3 = 'Fast')
+HANDHELD_AMOUNT = 1.0     # v112: small human camera shake for scenes whose CAMERA line says 'drone', 'handheld' or 'first person' (0 = off)
 NO_TRANSITIONS_ALL = False
 
 
@@ -1016,7 +1024,13 @@ def cin_pose_at(moves, strength, t):
 def cin_pose_plan(plan, t):
     if plan.get("static"):
         return {"tx": 0.0, "ty": 0.0, "zoom": 0.0, "dz": 0.0, "roll": 0.0}
-    return cin_pose_at(plan["moves"], plan["strength"], t)
+    pose = cin_pose_at(plan["moves"], plan["strength"], t)
+    if plan.get("handheld") and HANDHELD_AMOUNT > 0:      # v112: the tiny wobble of a real camera in a person's hands
+        a = HANDHELD_AMOUNT
+        pose["tx"] += a * (0.045 * math.sin(2 * math.pi * 2.9 * t + 0.6) + 0.02 * math.sin(2 * math.pi * 7.3 * t))
+        pose["ty"] += a * (0.040 * math.sin(2 * math.pi * 3.7 * t + 1.9) + 0.02 * math.sin(2 * math.pi * 6.1 * t + 0.4))
+        pose["roll"] += a * 0.30 * math.sin(2 * math.pi * 2.3 * t + 2.2)
+    return pose
 
 
 def _cin_session(tmp):
@@ -1461,7 +1475,7 @@ def cinema_plan(idx, scene, meta):
     kb = None
     if TEACHING_MODE and static and not dev and not _still_txt:
         kb = "push" if (idx % 2 == 0) else "pull"
-    return {"kb": kb, "dev": dev, "static": static, "overlays": parse_overlays(scene), "moves": moves, "strength": strength, "kind": kind, "dir": d, "cam_text": cam, "tr_text": tr, "subscribe": parse_subscribe(scene), "end": parse_end(scene)}
+    return {"handheld": bool(re.search(r"(?i)\bdrone\b|\bhandheld\b|\bfirst[\s-]?person\b", cam or "")), "kb": kb, "dev": dev, "static": static, "overlays": parse_overlays(scene), "moves": moves, "strength": strength, "kind": kind, "dir": d, "cam_text": cam, "tr_text": tr, "subscribe": parse_subscribe(scene), "end": parse_end(scene)}
 
 
 # ---------------- SUBSCRIBE LABEL (v71): an animated subscribe button, placed by the script ----------------
@@ -1809,7 +1823,7 @@ WORD_SYNC = True   # v85: words/labels/spotlights appear exactly when the voice 
 OVERLAY_TEXT_BOOST = 1.45        # on-screen words (typed text, arrows, pop-ins, labels) are this much bigger: easy to read in a lesson video        # B, G, R of the accent colour (a warm yellow-orange)
 CINEMA_STATIC_CLEAN = True            # NO CAMERA scenes: no vignette and no film grain, so small screen text stays clear
 
-_ANIM_VERBS = r"pulse|flow|spotlight|spot|focus|scale|stagger|split|slide|fade|label|cursor|mouse|pointer|click|clicks|clicking|type|types|typing|type-on|pop|pop-in|appear|appears|highlight|highlights|scroll|scrolls|scrolling|arrow|reveal|underline|draw"
+_ANIM_VERBS = r"countup|count-up|pulse|flow|spotlight|spot|focus|scale|stagger|split|slide|fade|label|cursor|mouse|pointer|click|clicks|clicking|type|types|typing|type-on|pop|pop-in|appear|appears|highlight|highlights|scroll|scrolls|scrolling|arrow|reveal|underline|draw"
 
 
 def _ov_clean(s, n=120):
@@ -1949,6 +1963,10 @@ def parse_overlays(scene):
                 quoted = re.search(r"[\"“](.+?)[\"”]", act) or re.search(r"'([^']{2,})'", act)
                 qtext = _ov_clean(quoted.group(1), 90) if quoted else ""
                 pos = _ov_pos(re.sub(r"[\"“].+?[\"”]", " ", act))
+                if re.match(r"(?i)^count-?up\b", act):          # v112: a money counter that rolls up to the price:  countup "$40,000,000"
+                    if qtext and re.search(r"\d", qtext):
+                        anims.append({"kind": "count", "text": qtext, "pos": pos or (0.5, 0.17)})
+                    continue
                 if re.match(r"(?i)^pulse\b", act):
                     if pos:
                         anims.append({"kind": "pulse", "text": qtext, "pos": pos})
@@ -2062,6 +2080,51 @@ class _OvTag(_OvItem):
     def draw(self, frame, t):
         p = min(max((t - self.t0) / 0.38, 0.0), 1.0)
         _ov_blit(frame, self.img, self.pos[0] * self.W, self.pos[1] * self.H, scale=0.55 + 0.45 * _ov_ob(p), alpha=self.fade(t))
+
+
+class _OvCount(_OvItem):
+    """v112: a gold money counter that rolls from 0 up to the price (e.g. $40,000,000) and then holds."""
+
+    def __init__(self, text, pos, W, H, u, t0, t1):
+        import re as _re
+        self.pos, self.W, self.H, self.t0, self.t1, self.u = pos, W, H, t0, t1, u
+        m = _re.search(r"[\d][\d,\.]*", text)
+        self.pre = text[:m.start()].strip() if m else ""
+        self.post = text[m.end():].strip() if m else ""
+        raw = (m.group(0) if m else "0").replace(",", "")
+        try:
+            self.val = float(raw)
+        except ValueError:
+            self.val = 0.0
+        self.dec = len(raw.split(".")[1]) if "." in raw else 0
+        self.cache = {}
+        w_ = self._img(self.val)
+        self.final_w = w_.shape[1]
+
+    def _fmt(self, v):
+        n = f"{v:,.{self.dec}f}"
+        return (self.pre + n + ((" " + self.post) if self.post else "")).strip()
+
+    def _img(self, v):
+        key = self._fmt(v)
+        im = self.cache.get(key)
+        if im is None:
+            im = _ov_text_rgba(key, 74 * self.u, fill=(255, 214, 90), bg=(18, 14, 8, 225), padx=30 * self.u, pady=14 * self.u, radius=22 * self.u, border=(60, 190, 255, 255))
+            if len(self.cache) > 400:
+                self.cache.clear()
+            self.cache[key] = im
+        return im
+
+    def draw(self, frame, t):
+        p = min(max((t - self.t0) / 1.6, 0.0), 1.0)
+        e = 1 - (1 - p) ** 3
+        v = self.val * e
+        if self.dec == 0:
+            v = float(int(v))
+        else:
+            v = round(v, self.dec)
+        img = self._img(v if p < 1.0 else self.val)
+        _ov_blit(frame, img, self.pos[0] * self.W, self.pos[1] * self.H, scale=0.9 + 0.1 * _ov_ob(min(max((t - self.t0) / 0.35, 0.0), 1.0)), alpha=self.fade(t, 0.2, 0.35))
 
 
 class _OvTitle(_OvItem):
@@ -2561,6 +2624,9 @@ class _Overlay:
             elif k == "pop":
                 plan.append(("pop", an, tc, 0.4, None, None))
                 tc += 0.55
+            elif k == "count":
+                plan.append(("count", an, max(tc, 0.7), 1.8, None, None))
+                tc += 2.0
             elif k == "highlight":
                 plan.append(("highlight", an, tc, 0.5, None, None))
                 tc += 0.6
@@ -2609,6 +2675,8 @@ class _Overlay:
             elif k == "pop":
                 if an.get("text"):
                     self.items.append(_OvTag(an["text"], _auto(an), W, H, u, t0, min(avail, t0 + OVERLAY_HOLD)))
+            elif k == "count":
+                self.items.append(_OvCount(an["text"], an.get("pos") or (0.5, 0.17), W, H, u, t0, min(avail, t0 + 1.8 + OVERLAY_HOLD + 1.0)))
             elif k == "highlight":
                 self._add_label(an.get("style", "highlight"), an.get("text", ""), _auto(an), u, t0, min(avail, t0 + OVERLAY_HOLD))
             elif k == "scroll":
@@ -5034,6 +5102,14 @@ def main():
                     clip_by_scene[int(c["scene_number"])] = c["clip_url"]
             except (TypeError, ValueError, KeyError):
                 continue
+    # v112: 3D clips rendered by scripts/plan3d.py (clips3d.json: {"scene number": "path/to/clip.mp4"})
+    try:
+        if os.path.exists("clips3d.json"):
+            for _k, _v in (json.load(open("clips3d.json")) or {}).items():
+                if _v and os.path.exists(_v):
+                    clip_by_scene[int(_k)] = _v
+    except Exception as _e:
+        print(f"::warning::3D clips not read ({_e})")
     print(f"animated clips offered for {len(clip_by_scene)} scene(s)")
 
     # sound-effect plan offered by n8n (from the script's SOUND lines and the story itself)
