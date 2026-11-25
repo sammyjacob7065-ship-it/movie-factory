@@ -1,0 +1,11 @@
+Model Information:
+* title:	Stomach
+* source:	https://sketchfab.com/3d-models/stomach-29b78b9373c943a8bb6c5c2cf4592967
+* author:	SAIKIRAN PANDHINA (https://sketchfab.com/SAIKIRAN.PANDHINA)
+
+Model License:
+* license type:	CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+* requirements:	Author must be credited. Commercial use is allowed.
+
+If you use this 3D model in your project be sure to copy paste this credit wherever you share it:
+This work is based on "Stomach" (https://sketchfab.com/3d-models/stomach-29b78b9373c943a8bb6c5c2cf4592967) by SAIKIRAN PANDHINA (https://sketchfab.com/SAIKIRAN.PANDHINA) licensed under CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
