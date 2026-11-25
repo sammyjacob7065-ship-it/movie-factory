@@ -101,7 +101,7 @@ def run_jobs(jobs):
     for j in jobs:
         os.makedirs(os.path.dirname(os.path.join(ROOT, j["out"])), exist_ok=True)
     jf = os.path.join(ROOT, "jobs3d.json")
-    json.dump([{k: v for k, v in j.items() if not k.startswith("_")} for j in jobs], open(jf, "w"))
+    json.dump([{**{k: v for k, v in j.items() if not k.startswith("_")}, "out": os.path.join(ROOT, j["out"])} for j in jobs], open(jf, "w"))   # absolute path: render.js runs inside scripts/render3d, so a relative path landed in the wrong folder
     r = subprocess.run(["node", "render.js", "--batch", jf], cwd=os.path.join(ROOT, "scripts", "render3d"))
     return r.returncode
 
