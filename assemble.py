@@ -4416,10 +4416,19 @@ def build_clip_segment(scene_index, clip_path, audio_path, duration, sub_text, t
     ]
     if next_frame:
         cmd += ["-loop", "1", "-framerate", str(FPS), "-i", next_frame]
+    # v128: a game clip carries its own game sounds (ticks, chimes, whoosh...): mix them under the voice
+    clip_has_audio = False
+    try:
+        _pr = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_type", "-of", "csv=p=0", clip_path], capture_output=True, text=True)
+        clip_has_audio = "audio" in (_pr.stdout or "")
+    except Exception:
+        clip_has_audio = False
+    if clip_has_audio:
+        fc += f";[1:a]{af}[va];[0:a]aresample=44100,aformat=channel_layouts=stereo,volume=0.5,apad[sa];[va][sa]amix=inputs=2:duration=first:normalize=0[aout]"
+        cmd += ["-filter_complex", fc, "-map", "[vout]", "-map", "[aout]"]
+    else:
+        cmd += ["-filter_complex", fc, "-map", "[vout]", "-map", "1:a", "-af", af]
     cmd += [
-        "-filter_complex", fc,
-        "-map", "[vout]", "-map", "1:a",
-        "-af", af,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", str(VIDEO_CRF),
         "-maxrate", VIDEO_MAXRATE, "-bufsize", "12M", "-pix_fmt", "yuv420p", "-r", str(FPS),
         "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
@@ -5110,6 +5119,13 @@ def main():
                     clip_by_scene[int(_k)] = _v
     except Exception as _e:
         print(f"::warning::3D clips not read ({_e})")
+    # v128: brain-game videos (scripts/plan3d.py -> games.json): one continuous game screen cut into scenes; those scenes last exactly as long as planned, have no burned-in captions and no soft join
+    game_len = {}
+    try:
+        if os.path.exists("games.json"):
+            game_len = {int(k): float(v) for k, v in (json.load(open("games.json")).get("len") or {}).items()}
+    except Exception as _e:
+        print(f"::warning::games.json not read ({_e})")
     print(f"animated clips offered for {len(clip_by_scene)} scene(s)")
 
     # sound-effect plan offered by n8n (from the script's SOUND lines and the story itself)
@@ -5195,11 +5211,16 @@ def main():
                     run(["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
                          "-t", str(duration), scene_audio_path])
 
+                if int(scene_num) in game_len and clip_by_scene.get(int(scene_num)):
+                    duration = max(duration, game_len[int(scene_num)])      # v128: a game scene lasts as long as its part of the game (the voice only fills the start)
+
                 sub_lines = lines_by_scene.get(scene_num, [])
                 sub_text = " ".join(
                     l["text"] if l["speaker"] == "NARRATOR" else f'{l["speaker"].title()}: {l["text"]}'
                     for l in sub_lines
                 )
+                if int(scene_num) in game_len and clip_by_scene.get(int(scene_num)):
+                    sub_text = ""                                           # v128: the game screen has its own words; no burned-in caption box on top (the YouTube caption track is still sent)
 
                 segment_path = os.path.join(tmp, f"segment_{i:03d}.mp4")
 
@@ -5265,7 +5286,7 @@ def main():
                         if not os.path.exists(clip_path):
                             download(clip_url, clip_path)
                         next_frame = None
-                        if CLIP_JOIN_BLEND > 0 and i + 1 < len(scenes):
+                        if CLIP_JOIN_BLEND > 0 and i + 1 < len(scenes) and int(scene_num) not in game_len:
                             try:
                                 nn = int(scenes[i + 1]["scene_number"])
                                 nurl = clip_by_scene.get(nn)
