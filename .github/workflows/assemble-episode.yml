@@ -82,17 +82,17 @@ jobs:
           timeout 300 pip install faster-whisper || echo "WARNING: word timing did not install - estimated timing will be used"
           timeout 200 python -c "from faster_whisper import WhisperModel; WhisperModel('tiny.en', device='cpu', compute_type='int8')" || echo "WARNING: word-timing model not downloaded"
 
-      # NEW (v112): real 3D scenes (three.js). Runs ONLY when a scene asks for one (scale-3D in the script).
+      # NEW (v112): real 3D scenes (three.js). Runs ONLY when a scene asks for one (scale-3D or scale-GAME in the script).
       # If anything here fails, those scenes simply keep their normal picture and the film still builds.
       - name: Set up Node (only if a scene needs 3D)
-        if: contains(inputs.manifest, 'scale-3D')
+        if: contains(inputs.manifest, 'scale-3D') || contains(inputs.manifest, 'scale-GAME')
         continue-on-error: true
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
       - name: Render the 3D scenes (only if a scene needs 3D)
-        if: contains(inputs.manifest, 'scale-3D')
+        if: contains(inputs.manifest, 'scale-3D') || contains(inputs.manifest, 'scale-GAME')
         continue-on-error: true
         timeout-minutes: 75
         env:
