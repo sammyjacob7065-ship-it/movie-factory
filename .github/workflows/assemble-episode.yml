@@ -97,7 +97,10 @@ jobs:
         timeout-minutes: 75
         env:
           MANIFEST_JSON: ${{ inputs.manifest }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}   # v128: only to MEASURE the real voice length, so the game is timed to the voice
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         run: |
+          if ! fc-list | grep -qi "noto color emoji"; then timeout 150 sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 install -y --no-install-recommends fonts-noto-color-emoji || echo "WARNING: colour emoji font not installed"; fi
           cd scripts/render3d
           npm install --no-audit --no-fund
           npx playwright install --with-deps chromium
