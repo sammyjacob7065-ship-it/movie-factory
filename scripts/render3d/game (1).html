@@ -1,0 +1,426 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>html,body{margin:0;background:#000;overflow:hidden}canvas{display:block}</style>
+<canvas id="c" width="1080" height="1920"></canvas>
+<script>
+// BRAIN-GAME CLIPS: every picture is a pure function of the time t, so frames can be rendered one by one.
+// window.draw(spec, t) draws one frame. spec.k is the kind of scene. Layout keeps the middle band (about y 1000-1320) light because the caption box sits there.
+const W = 1080, H = 1920, cv = document.getElementById('c'), oc = document.createElement('canvas'); oc.width = W; oc.height = H;
+let g = cv.getContext('2d'); const G0 = g, OG = oc.getContext('2d');
+const FONT = '"Poppins","Liberation Sans","DejaVu Sans",Arial,sans-serif';
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const eo = (x) => 1 - Math.pow(1 - clamp(x), 3);
+const eb = (x) => { x = clamp(x); const c1 = 0.9, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); };
+const mk = (s) => () => { s |= 0; s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+const TH = { violet: ['#150d3a', '#4c1d95', '#a78bfa'], teal: ['#04222b', '#0e7490', '#22d3ee'], sunset: ['#33081f', '#be185d', '#fbbf24'], green: ['#04261a', '#15803d', '#4ade80'], red: ['#260909', '#b91c1c', '#fb923c'], blue: ['#08183a', '#1d4ed8', '#60a5fa'] };
+let th = TH.violet;
+const GOLD = '#facc15', CY = '#22d3ee', PK = '#f472b6', GR = '#4ade80', WH = '#ffffff';
+
+let BGK = 'stage';
+function beam(x0, ang, wid, len, col, a) { g.save(); g.translate(x0, -40); g.rotate(ang); const gr = g.createLinearGradient(0, 0, 0, len); gr.addColorStop(0, col + Math.round(a * 255).toString(16).padStart(2, '0')); gr.addColorStop(1, col + '00'); g.fillStyle = gr; g.beginPath(); g.moveTo(-14, 0); g.lineTo(14, 0); g.lineTo(wid, len); g.lineTo(-wid, len); g.closePath(); g.fill(); g.restore(); }
+function bg(t) {   // a background that fits the game: 'air' = clear breathing sky for lungs and tongue twisters, 'arena' = a race stadium, 'stage' = a quiz-show stage for the brain games
+  const gr = g.createLinearGradient(0, 0, 0, H); gr.addColorStop(0, th[0]); gr.addColorStop(0.6, th[1]); gr.addColorStop(1, th[0]);
+  g.globalAlpha = 1; g.fillStyle = gr; g.fillRect(0, 0, W, H);
+  if (BGK === 'air') {
+    const br = 0.5 + 0.5 * Math.sin(t * 0.9), rg = g.createRadialGradient(W / 2, H * 0.5, 80, W / 2, H * 0.5, 620 + 90 * br); rg.addColorStop(0, th[2] + '30'); rg.addColorStop(1, th[2] + '00'); g.fillStyle = rg; g.fillRect(0, 0, W, H);   // a soft glow that swells and shrinks like a breath
+    for (let i = 0; i < 16; i++) { const sp = 40 + (i % 5) * 14, r = 16 + (i % 4) * 12, x = (i * 173 + 90) % W + Math.sin(t * 0.7 + i * 2) * 26, y = H + 80 - ((t * sp + i * 257) % (H + 160)); g.globalAlpha = 0.28; g.lineWidth = 3; g.strokeStyle = '#ffffff'; g.beginPath(); g.arc(x, y, r, 0, 7); g.stroke(); g.globalAlpha = 0.07; g.fillStyle = '#ffffff'; g.fill(); }   // air bubbles floating up
+  } else if (BGK === 'arena') {
+    for (let i = 0; i < 4; i++) { const x = 130 + i * 273, a = Math.sin(t * 0.8 + i * 1.6) * 0.28; beam(x, a, 150, 1500, '#ffffff', 0.13); }   // stadium floodlights
+    g.globalAlpha = 1; g.fillStyle = '#00000055'; g.fillRect(0, 1560, W, 360);
+    for (let i = 0; i < 38; i++) { const x = i * 29 + 14, y = 1640 + (i % 4) * 46 + Math.abs(Math.sin(t * 3 + i * 1.3)) * -14; g.fillStyle = ['#fbbf24', '#f472b6', '#38bdf8', '#a3e635', '#fb7185'][i % 5]; g.globalAlpha = 0.5; g.beginPath(); g.arc(x, y, 12, 0, 7); g.fill(); g.globalAlpha = 0.3; g.fillRect(x - 12, y + 6, 24, 40); }   // the cheering crowd
+  } else {
+    beam(W * 0.25, 0.18 + 0.08 * Math.sin(t * 0.5), 210, 1300, th[2], 0.2); beam(W * 0.75, -0.18 - 0.08 * Math.sin(t * 0.5 + 1), 210, 1300, th[2], 0.2);   // quiz-show spotlights
+    g.save(); g.globalAlpha = 0.16; g.strokeStyle = th[2]; g.lineWidth = 2; const hz = 1230; for (let i = -9; i <= 9; i++) { g.beginPath(); g.moveTo(W / 2 + i * 60, hz); g.lineTo(W / 2 + i * 330, H); g.stroke(); } for (let k = 0; k < 8; k++) { const u = ((k + (t * 0.35) % 1) / 8), y = hz + (H - hz) * u * u; g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke(); } g.restore();   // a game floor
+    for (let i = 0; i < 22; i++) { const x = (i * 211 + 40) % W, y = (i * 389 + 60) % 1150; g.globalAlpha = 0.1 + 0.25 * (0.5 + 0.5 * Math.sin(t * 1.4 + i * 2.1)); g.fillStyle = '#ffffff'; g.beginPath(); g.arc(x, y, 2 + (i % 3), 0, 7); g.fill(); }   // twinkling stars
+  }
+  g.globalAlpha = 1;
+  const vg = g.createRadialGradient(W / 2, H / 2, 650, W / 2, H / 2, 1350); vg.addColorStop(0, '#00000000'); vg.addColorStop(1, '#00000088');
+  g.fillStyle = vg; g.fillRect(0, 0, W, H);
+}
+const EMOG = /(\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic}|\p{Emoji_Modifier})*)/gu, EMOF = '"Noto Color Emoji",' + FONT;
+function tx(s, x, y, size, col, o = {}) {   // text; emoji inside it are drawn with the colour emoji font (the plain font would give black outline faces)
+  s = String(s); const parts = s.split(EMOG).filter(p => p !== ''), isE = (p) => /\p{Extended_Pictographic}/u.test(p), wt = (o.w || 'bold') + ' ';
+  g.save(); g.globalAlpha = o.a === undefined ? 1 : clamp(o.a); g.textBaseline = 'middle'; g.textAlign = 'left';
+  const meas = (sz) => parts.map(p => { g.font = wt + sz + 'px ' + (isE(p) ? EMOF : FONT); return g.measureText(p).width; });
+  let ws = meas(size), tot = ws.reduce((a, b) => a + b, 0);
+  if (o.maxW && tot > o.maxW) { size = Math.floor(size * o.maxW / tot); ws = meas(size); tot = ws.reduce((a, b) => a + b, 0); }
+  g.translate(x, y); if (o.rot) g.rotate(o.rot); if (o.sc) g.scale(o.sc, o.scy === undefined ? o.sc : o.scy);
+  let px = o.al === 'left' ? 0 : (o.al === 'right' ? -tot : -tot / 2);
+  if (o.glow) { g.shadowColor = o.glow; g.shadowBlur = o.gb || 30; }
+  parts.forEach((p, i) => { const e = isE(p); g.font = wt + size + 'px ' + (e ? EMOF : FONT);
+    if (o.stroke && !e) { g.lineWidth = o.sw || 10; g.strokeStyle = o.stroke; g.lineJoin = 'round'; g.strokeText(p, px, 0); }
+    g.fillStyle = col; g.fillText(p, px, 0); px += ws[i]; });
+  g.restore();
+}
+function rr(x, y, w, h, r, fill, o = {}) {
+  g.save(); g.globalAlpha = o.a === undefined ? 1 : clamp(o.a); g.beginPath(); g.roundRect(x, y, w, h, r);
+  if (o.glow) { g.shadowColor = o.glow; g.shadowBlur = o.gb || 24; }
+  if (fill) { g.fillStyle = fill; g.fill(); } if (o.line) { g.lineWidth = o.lw || 6; g.strokeStyle = o.line; g.stroke(); } g.restore();
+}
+function ring(x, y, r, col, a, lw = 8) { g.save(); g.globalAlpha = clamp(a); g.lineWidth = lw; g.strokeStyle = col; g.beginPath(); g.arc(x, y, r, 0, 7); g.stroke(); g.restore(); }
+function confetti(t, t0, seed, cx, cy, n = 46) {
+  const dt = t - t0; if (dt < 0 || dt > 2.2) return; const r = mk(seed);
+  for (let i = 0; i < n; i++) {
+    const a = r() * 6.283, sp = 350 + r() * 650, c = [GOLD, CY, PK, GR, WH][i % 5], s = 12 + r() * 14;
+    const x = cx + Math.cos(a) * sp * dt, y = cy + Math.sin(a) * sp * dt + 900 * dt * dt * 0.5;
+    g.save(); g.globalAlpha = clamp(1.6 - dt / 1.4); g.translate(x, y); g.rotate(dt * (3 + r() * 6)); g.fillStyle = c; g.fillRect(-s / 2, -s / 4, s, s / 2); g.restore();
+  }
+}
+function hud(sp, t) {   // only a small plain label (no box)
+  if (sp.lv && !['hook', 'scroll', 'race', 'pick', 'result', 'words'].includes(sp.k)) tx(sp.lv, W / 2, 118, 34, '#e5e7eb', { w: '600', a: 0.85 });
+}
+
+function countdown(x, y, r, t, T, col = GOLD) {   // a ring that empties until T, with the seconds left inside
+  const left = clamp((T - t) / T); if (t >= T) return;
+  g.save(); g.lineWidth = 14; g.strokeStyle = '#ffffff30'; g.beginPath(); g.arc(x, y, r, 0, 7); g.stroke();
+  g.strokeStyle = col; g.lineCap = 'round'; g.shadowColor = col; g.shadowBlur = 18; g.beginPath(); g.arc(x, y, r, -Math.PI / 2, -Math.PI / 2 + 6.283 * left); g.stroke(); g.restore();
+  tx(String(Math.max(1, Math.ceil(T - t))), x, y + 3, r * 1.1, WH);
+}
+function wrap(text, maxW, size) {
+  g.font = 'bold ' + size + 'px ' + FONT; const ws = String(text).split(' '), out = []; let cur = '';
+  for (const w of ws) { const tt = cur ? cur + ' ' + w : w; if (g.measureText(tt).width > maxW && cur) { out.push(cur); cur = w; } else cur = tt; }
+  if (cur) out.push(cur); return out;
+}
+
+const K = {};
+K.hook = (sp, t) => {
+  const cx = W / 2;
+  for (let i = 0; i < 3; i++) { const p = ((t * 0.7 + i / 3) % 1); ring(cx, 520, 150 + p * 330, th[2], (1 - p) * 0.5, 6); }
+  const s = eb(t / 0.6); tx(sp.e || '🧠', cx, 520 + Math.sin(t * 3) * 14, 330 * s, WH, { glow: th[2], gb: 60 });
+  const L = sp.t || [], cols = [WH, GOLD, WH, CY];
+  L.forEach((ln, i) => { const p = eb((t - 0.35 - i * 0.28) / 0.35), sh = t < 0.7 ? Math.sin(t * 60) * 4 * (1 - t / 0.7) : 0;
+    tx(ln, cx + sh, 800 + i * 128, 118, cols[i % 4], { maxW: 960, sc: 0.6 + 0.4 * p, a: p * 1.6, stroke: '#000000aa', sw: 14, glow: th[2], gb: 24 }); });
+  if (sp.s) tx(sp.s, cx, 800 + L.length * 128 + 30, 50, '#e5e7eb', { maxW: 940, a: eo((t - 1.1) / 0.4), w: '600' });
+};
+K.scroll = (sp, t) => {   // ONE continuous reading screen: lines rise from the bottom edge, pass the middle and fade out at the top. No box. Slow, and only faster at the end.
+  const S = sp.S, P = 250, CY0 = 900, Y0 = 1700, v0 = sp.v0 || 125, v1 = sp.v1 || 200, tr = 0.7 * S;
+  const off = (tt) => { if (tt > S) return off(S) + v1 * (tt - S); return tt <= tr ? v0 * tt : v0 * tr + v0 * (tt - tr) + (v1 - v0) * (tt - tr) * (tt - tr) / (2 * (S - tr)); };
+  const o = off(t);
+  sp.L.forEach((ln, i) => { if (!ln) return; const y = Y0 + i * P - o; if (y < 270 || y > 1995) return;
+    const f = Math.exp(-Math.pow((y - CY0) / 560, 2)), a = clamp((1995 - y) / 300) * clamp((y - 540) / 240), c = Math.round(190 + 65 * f);
+    tx(ln, W / 2, y, 76 + 16 * f, 'rgb(' + c + ',' + Math.round(200 + 55 * f) + ',' + Math.round(215 + 40 * f) + ')', { maxW: 960, a: a * (0.5 + 0.5 * f), stroke: '#00000066', sw: 8 });
+  });
+  const ms = sp.ms || [], pts = [[0, 0]].concat(ms.map(m => [m[0], m[1]])).concat([[S, 100]]); let val = 100;
+  for (let i = 0; i < pts.length - 1; i++) if (t >= pts[i][0] && t < pts[i + 1][0]) { val = pts[i][1] + (pts[i + 1][1] - pts[i][1]) * (t - pts[i][0]) / Math.max(0.01, pts[i + 1][0] - pts[i][0]); }
+  const bx = 70, bw = W - 140, by = 190;
+  tx(sp.ml || 'SCORE', bx, 140, 36, '#e5e7eb', { al: 'left', w: '600' }); tx(Math.round(val) + '%', W - bx, 140, 52, GOLD, { al: 'right' });
+  rr(bx, by, bw, 26, 13, '#ffffff24'); rr(bx, by, Math.max(26, bw * val / 100), 26, 13, GOLD, { glow: GOLD, gb: 14 });
+  ms.forEach(m => { const x = bx + bw * m[1] / 100, on = t >= m[0]; g.save(); g.fillStyle = on ? GOLD : '#ffffff66'; g.fillRect(x - 2, by - 8, 4, 42); g.restore(); tx(m[1] + '%', x, by + 62, 30, on ? GOLD : '#ffffff99', { w: '600' }); });
+  ms.forEach(m => { const dt = t - m[0]; if (dt < 0 || dt > 2.4) return; const p = eo(dt / 0.35), a = Math.min(1, dt * 4) * (1 - clamp((dt - 1.8) / 0.6));
+    tx(m[2] || (m[1] + '% ✅'), W / 2, 365 + (1 - p) * 40, 76, GR, { a: a, glow: GR, stroke: '#000000aa', sw: 10, maxW: 960 }); if (m[3]) tx(m[3], W / 2, 450 + (1 - p) * 40, 40, '#f1f5f9', { a: a, w: '600', maxW: 960 }); });
+};
+
+const GRIDS = {};
+function wordGrid(sp) {
+  const key = JSON.stringify([sp.w, sp.seed, sp.c, sp.r]); if (GRIDS[key]) return GRIDS[key];
+  const C = sp.c, R = sp.r, r = mk(sp.seed || 1), cells = Array.from({ length: R }, () => Array(C).fill('')), pos = [];
+  const used = new Set();
+  sp.w.forEach((w, i) => {
+    for (let tr = 0; tr < 200; tr++) {
+      const vert = (i === 1 && w.length <= R && r() < 0.5), dr = vert ? 1 : 0, dc = vert ? 0 : 1;
+      const r0 = Math.floor(r() * (R - (vert ? w.length - 1 : 0))), c0 = Math.floor(r() * (C - (vert ? 0 : w.length - 1)));
+      let ok = true; for (let j = 0; j < w.length; j++) { const rr_ = r0 + dr * j, cc = c0 + dc * j; if (cells[rr_][cc] && cells[rr_][cc] !== w[j]) ok = false; if (!vert && used.has(rr_)) ok = false; }
+      if (!ok) continue; for (let j = 0; j < w.length; j++) cells[r0 + dr * j][c0 + dc * j] = w[j]; if (!vert) used.add(r0);
+      pos.push({ r0, c0, dr, dc, n: w.length }); return;
+    }
+    pos.push({ r0: i, c0: 0, dr: 0, dc: 1, n: w.length }); for (let j = 0; j < w.length; j++) cells[i][j] = w[j];
+  });
+  const AL = 'ABDEFGHIJKLMNOPQRSTUVWXYZ'; for (let a = 0; a < R; a++) for (let b = 0; b < C; b++) if (!cells[a][b]) cells[a][b] = AL[Math.floor(r() * AL.length)];
+  return GRIDS[key] = { cells, pos };
+}
+K.words = (sp, t) => {   // one steady grid (countdown bar), then the hidden words light up one by one, then one word at a time with its meaning
+  const G = wordGrid(sp), C = sp.c, R = sp.r, cell = Math.min(940 / C, 800 / R), x0 = (W - cell * C) / 2, y0 = 330;
+  tx(sp.ttl || 'WHAT DO YOU SEE FIRST?', W / 2, 225, 62, GOLD, { maxW: 980, stroke: '#000000aa', sw: 10, glow: GOLD, gb: 20 });
+  const rv = sp.rv || [], fc = (sp.foc || []).filter(f => t >= f[0]), cur = fc.length ? fc[fc.length - 1] : null;
+  if (sp.cdT && t < sp.cdT) { rr(160, 282, W - 320, 16, 8, '#ffffff25'); rr(160, 282, (W - 320) * clamp(1 - t / sp.cdT), 16, 8, (t / sp.cdT) > 0.8 ? '#ef4444' : GOLD); }
+  const wid = (a, b) => { for (let i = 0; i < G.pos.length; i++) { const p = G.pos[i]; for (let j = 0; j < p.n; j++) if (p.r0 + p.dr * j === a && p.c0 + p.dc * j === b) return i; } return -1; };
+  const dimA = (i) => cur && cur[1] !== i ? 0.3 : 1;
+  for (let a = 0; a < R; a++) for (let b = 0; b < C; b++) {
+    const ap = eo((t - 0.1 - (a + b) * 0.035) / 0.3), i = wid(a, b); let col = '#ffffffaa', sc = 1;
+    if (i >= 0 && rv[i] != null && t >= rv[i]) { col = [GOLD, CY, PK, GR][i % 4]; sc = 1 + 0.22 * Math.sin(clamp((t - rv[i]) / 0.6) * 3.14); }
+    tx(G.cells[a][b], x0 + cell * (b + 0.5), y0 + cell * (a + 0.5) + (1 - ap) * 30, cell * 0.62, col, { a: ap * (i >= 0 ? dimA(i) : (cur ? 0.35 : 1)), sc: sc, glow: col !== '#ffffffaa' ? col : null, gb: 18 });
+  }
+  G.pos.forEach((p, i) => { if (rv[i] == null || t < rv[i]) return; const col = [GOLD, CY, PK, GR][i % 4], pr = eo((t - rv[i]) / 0.35), da = dimA(i);
+    const w = p.dc ? cell * p.n : cell, h = p.dr ? cell * p.n : cell; rr(x0 + cell * p.c0 - 6, y0 + cell * p.r0 - 6, (w + 12) * pr, h + 12, 20, col + '22', { line: col, lw: 6, glow: col, a: da }); });
+  if (cur) { const i = cur[1], col = [GOLD, CY, PK, GR][i % 4], p = eo((t - cur[0]) / 0.5), yb = y0 + cell * R + 120;
+    tx((sp.em && sp.em[i]) || '', W / 2, yb + 10 + (1 - p) * 60, 130, WH, { a: p });
+    tx(sp.w[i], W / 2, yb + 130 + (1 - p) * 60, 84, col, { a: p, maxW: 940, glow: col, stroke: '#000000aa', sw: 10 });
+    if (sp.mean && sp.mean[i]) tx(sp.mean[i], W / 2, yb + 215 + (1 - p) * 60, 44, '#f1f5f9', { a: p, maxW: 940, w: '600' }); }
+};
+
+K.leet = (sp, t) => {
+  const T = sp.at || 3.1, lw = sp.t.split(' '), dw = sp.d.split(' ');
+  tx(sp.q || 'CAN YOU READ THIS?', W / 2, 230, 62, GOLD, { maxW: 980, stroke: '#000000aa', sw: 10, glow: GOLD, gb: 20 });
+  const lines = []; let cur = []; g.font = 'bold 130px ' + FONT;
+  lw.forEach((w, i) => { const tt = cur.concat([i]).map(j => lw[j]).join(' '); if (g.measureText(tt).width > 900 && cur.length) { lines.push(cur); cur = [i]; } else cur.push(i); }); if (cur.length) lines.push(cur);
+  const lh = 150, y0 = 640 - (lines.length - 1) * lh / 2;
+  lines.forEach((ln, li) => { let tw = 0; const ws = ln.map(i => { const a = (t >= T + 0.25 * i + 0.25) ? dw[i] : lw[i]; g.font = 'bold 130px ' + FONT; return [i, a, g.measureText(a).width]; });
+    const gap = 36; tw = ws.reduce((s, x) => s + x[2], 0) + gap * (ws.length - 1); let x = W / 2 - tw / 2;
+    ws.forEach(([i, a, w]) => { const f = clamp((t - T - 0.25 * i) / 0.5), sy = Math.abs(Math.cos(f * Math.PI)), dec = t >= T + 0.25 * i + 0.25, jit = t < T ? Math.sin(t * 30 + i * 2) * 2 : 0;
+      tx(a, x + w / 2 + jit, y0 + li * lh, 130, dec ? GR : WH, { maxW: 940, scy: f > 0 && f < 1 ? Math.max(0.05, sy) : 1, sc: 1, glow: dec ? GR : CY, stroke: '#000000aa', sw: 10, a: eo(t / 0.25) }); x += w + gap; }); });
+  if (t < T) countdown(W / 2, 960, 62, t, T); else { tx('✅', W / 2, 960, 120, WH, { sc: eb((t - T - 0.6) / 0.4), a: clamp((t - T - 0.6) * 4) }); confetti(t, T + 0.6, 12, W / 2, 640, 30); }
+};
+K.stroop = (sp, t) => {
+  const per = sp.per || 0.9, st = sp.st || 0.5, R = sp.r, k = Math.floor((t - st) / per);
+  tx(sp.ttl || 'SAY THE COLOR, NOT THE WORD!', W / 2, 225, 60, GOLD, { maxW: 980, stroke: '#000000aa', sw: 10, glow: GOLD, gb: 20 });
+  if (t >= st && k < R.length) { const q = R[k], u = ((t - st) % per) / per, p = eb(u / 0.3); tx(q[0], W / 2, 640, 250, q[1], { maxW: 980, sc: 0.7 + 0.3 * p, stroke: '#ffffffcc', sw: 12, glow: q[1], gb: 40 });
+    rr(160, 880, W - 320, 20, 10, '#ffffff25'); rr(160, 880, (W - 320) * (1 - u), 20, 10, GOLD); }
+  for (let i = 0; i < R.length; i++) { const on = t >= st + i * per; g.save(); g.globalAlpha = on ? 1 : 0.3; g.fillStyle = on ? GOLD : '#ffffff'; g.beginPath(); g.arc(W / 2 + (i - (R.length - 1) / 2) * 56, 980, 14, 0, 7); g.fill(); g.restore(); }
+  if (sp.rv && t >= st + R.length * per) { const tt = t - st - R.length * per; R.forEach((q, i) => { const p = eb((tt - i * 0.18) / 0.3); tx(sp.nm[i], W / 2, 430 + i * 118, 92, q[1], { sc: p, a: p, stroke: '#ffffffcc', sw: 8, glow: q[1] }); }); }
+};
+K.odd = (sp, t) => {
+  const C = sp.c, R = sp.r, cell = Math.min(940 / C, 800 / R), x0 = (W - cell * C) / 2, y0 = 330, T = sp.T || 4.2, rv = t >= T, dp = eo((t - T) / 0.5);
+  tx(sp.ttl || 'FIND THE ODD ONE!', W / 2, 225, 62, GOLD, { maxW: 980, stroke: '#000000aa', sw: 10, glow: GOLD, gb: 20 });
+  if (!rv) { rr(160, 270, W - 320, 18, 9, '#ffffff25'); rr(160, 270, (W - 320) * clamp(1 - t / T), 18, 9, t / T > 0.7 ? '#ef4444' : GOLD); }
+  for (let a = 0; a < R; a++) for (let b = 0; b < C; b++) {
+    const isO = a === sp.oc[0] && b === sp.oc[1], ap = eo((t - (a + b) * 0.03) / 0.25), x = x0 + cell * (b + 0.5), y = y0 + cell * (a + 0.5);
+    tx(isO ? sp.o : sp.b, x, y, cell * 0.72, WH, { a: ap * (rv && !isO ? 1 - 0.85 * dp : 1), sc: isO && rv ? 1 + 0.7 * dp : 1, rot: rv ? 0 : Math.sin(t * 2 + a * 3 + b) * 0.03 });
+  }
+  if (rv) { const x = x0 + cell * (sp.oc[1] + 0.5), y = y0 + cell * (sp.oc[0] + 0.5); ring(x, y, cell * (0.9 - 0.2 * dp) + (t - T) % 0.8 * 60, GOLD, 0.9, 10); confetti(t, T, 5, x, y, 36); }
+};
+K.memory = (sp, t) => {
+  const n = String(sp.n), show = sp.show || 2.4, rv = sp.rv || 3.9;
+  tx(sp.ttl || 'REMEMBER THIS NUMBER!', W / 2, 225, 62, GOLD, { maxW: 980, stroke: '#000000aa', sw: 10, glow: GOLD, gb: 20 });
+  const sz = Math.min(190, 900 / n.length * 1.25), step = Math.min(sz * 0.78, 900 / n.length);
+  for (let i = 0; i < n.length; i++) { const x = W / 2 + (i - (n.length - 1) / 2) * step, vis = t < show, hit = t >= rv; const ap = vis ? eb((t - i * 0.12) / 0.3) : 1;
+    rr(x - step * 0.45, 640 - sz * 0.62, step * 0.9, sz * 1.24, 24, '#ffffff14', { line: hit ? GR : th[2], lw: 4 });
+    tx(vis || hit ? n[i] : '?', x, 640, sz, hit ? GR : (vis ? WH : '#ffffff77'), { sc: vis ? ap : (hit ? eb((t - rv - i * 0.1) / 0.3) : 1), glow: hit ? GR : th[2] }); }
+  if (t >= show && t < rv) countdown(W / 2, 960, 62, t - show, rv - show); if (t >= rv) confetti(t, rv, 9, W / 2, 640, 30);
+};
+K.math = (sp, t) => {
+  const T = sp.T || 3.6, L = wrap(sp.q, 940, 150);
+  tx(sp.ttl || 'SOLVE IT FAST!', W / 2, 225, 62, GOLD, { maxW: 980, stroke: '#000000aa', sw: 10, glow: GOLD, gb: 20 });
+  L.forEach((ln, i) => tx(ln, W / 2, 560 + i * 170 - (L.length - 1) * 85, 150, WH, { maxW: 980, sc: eb((t - i * 0.15) / 0.4), glow: th[2], stroke: '#000000aa', sw: 10 }));
+  if (t < T) countdown(W / 2, 960, 62, t, T); else { tx('= ' + sp.a, W / 2, 800, 190, GR, { sc: eb((t - T) / 0.5), glow: GR, stroke: '#000000aa', sw: 12 }); confetti(t, T, 21, W / 2, 800, 36); }
+};
+K.count = (sp, t) => {
+  const C = sp.c, R = sp.r, cell = Math.min(940 / C, 760 / R), x0 = (W - cell * C) / 2, y0 = 340, T = sp.T || 4, rg = mk(sp.seed || 3), cells = [], tg = String(sp.tg);
+  const idx = []; for (let i = 0; i < C * R; i++) idx.push(i); for (let i = idx.length - 1; i > 0; i--) { const j = Math.floor(rg() * (i + 1)); [idx[i], idx[j]] = [idx[j], idx[i]]; }
+  const hit = new Set(idx.slice(0, sp.n)); const others = '0123456789'.split('').filter(d => d !== tg);
+  for (let i = 0; i < C * R; i++) cells.push(hit.has(i) ? tg : others[Math.floor(rg() * others.length)]);
+  tx(sp.ttl || 'COUNT THE ' + tg + 'S!', W / 2, 225, 62, GOLD, { maxW: 980, stroke: '#000000aa', sw: 10, glow: GOLD, gb: 20 });
+  if (t < T) { rr(160, 270, W - 320, 18, 9, '#ffffff25'); rr(160, 270, (W - 320) * clamp(1 - t / T), 18, 9, GOLD); }
+  for (let a = 0; a < R; a++) for (let b = 0; b < C; b++) { const i = a * C + b, h = hit.has(i), rv = t >= T, p = eo((t - T - (i % 9) * 0.04) / 0.3), x = x0 + cell * (b + 0.5), y = y0 + cell * (a + 0.5);
+    if (rv && h) ring(x, y, cell * 0.48 * p, GOLD, p, 6);
+    tx(cells[i], x, y, cell * 0.66, rv ? (h ? GOLD : '#ffffff55') : WH, { a: eo((t - (a + b) * 0.03) / 0.25), sc: rv && h ? 1 + 0.25 * p : 1, glow: rv && h ? GOLD : null }); }
+  if (t >= T) { tx('' + sp.n, W / 2, 1215, 200, GOLD, { sc: eb((t - T - 0.3) / 0.5), glow: GOLD, stroke: '#000000aa', sw: 12 }); confetti(t, T + 0.3, 8, W / 2, 1180, 30); }
+};
+K.scramble = (sp, t) => {
+  const s = sp.s, a = sp.a, T = sp.T || 3.6, n = a.length, step = Math.min(150, 940 / n), sz = step * 0.84;
+  tx(sp.ttl || 'UNSCRAMBLE THE WORD!', W / 2, 225, 62, GOLD, { maxW: 980, stroke: '#000000aa', sw: 10, glow: GOLD, gb: 20 });
+  if (sp.h) { rr(W / 2 - 230, 330, 460, 80, 40, '#00000066', { line: th[2], lw: 3 }); tx('HINT: ' + sp.h, W / 2, 371, 42, WH, { maxW: 420 }); }
+  const used = Array(n).fill(false), tgt = [];
+  for (let i = 0; i < n; i++) { let j = -1; for (let k = 0; k < n; k++) if (!used[k] && a[k] === s[i]) { j = k; break; } used[j] = true; tgt.push(j); }
+  for (let i = 0; i < n; i++) { const x1 = W / 2 + (i - (n - 1) / 2) * step, x2 = W / 2 + (tgt[i] - (n - 1) / 2) * step, m = eo((t - T) / 0.9), x = x1 + (x2 - x1) * m, y = 640 - Math.sin(m * 3.14) * 90 + (t < T ? Math.sin(t * 3 + i) * 10 : 0);
+    rr(x - sz / 2, y - sz / 2, sz, sz, 22, m > 0.99 ? GR + '33' : '#ffffff1c', { line: m > 0.99 ? GR : th[2], lw: 5, glow: m > 0.99 ? GR : null });
+    tx(s[i], x, y + 4, sz * 0.72, m > 0.99 ? GR : WH, { sc: eb((t - i * 0.08) / 0.3) }); }
+  if (t < T) countdown(W / 2, 960, 62, t, T); else if (t > T + 1) confetti(t, T + 1, 31, W / 2, 640, 30);
+};
+K.illusion = (sp, t) => {
+  const T = sp.T || 3.8, rv = t >= T, dp = eo((t - T) / 0.5), cy = 640;
+  tx(sp.ttl || 'WHICH ONE IS LONGER?', W / 2, 225, 62, GOLD, { maxW: 980, stroke: '#000000aa', sw: 10, glow: GOLD, gb: 20 });
+  g.save(); g.lineCap = 'round'; g.lineWidth = 14;
+  if (sp.i === 'ml') { const L = 640, x0 = (W - L) / 2; [[480, 1], [800, -1]].forEach(([y, d], j) => { g.strokeStyle = j ? PK : CY; g.beginPath(); g.moveTo(x0, y); g.lineTo(x0 + L, y); g.stroke();
+      [[x0, 1], [x0 + L, -1]].forEach(([x, s]) => { g.beginPath(); g.moveTo(x + s * d * 70, y - 70); g.lineTo(x, y); g.lineTo(x + s * d * 70, y + 70); g.stroke(); }); });
+    if (rv) { g.strokeStyle = GOLD; g.lineWidth = 6; g.globalAlpha = dp; [x0, x0 + L].forEach(x => { g.beginPath(); g.moveTo(x, 380); g.lineTo(x, 900); g.stroke(); }); } }
+  else if (sp.i === 'ponzo') { g.strokeStyle = '#ffffff99'; g.lineWidth = 10; [[160, 960, 470, 360], [920, 960, 610, 360]].forEach(([x1, y1, x2, y2]) => { g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke(); });
+    [[470, 520, CY], [470, 800, PK]].forEach(([x, y, c], j) => { const w = 300; g.fillStyle = c; g.beginPath(); g.roundRect(W / 2 - w / 2, y - 24, w, 48, 12); g.fill(); });
+    if (rv) { g.strokeStyle = GOLD; g.lineWidth = 6; g.globalAlpha = dp; [W / 2 - 150, W / 2 + 150].forEach(x => { g.beginPath(); g.moveTo(x, 440); g.lineTo(x, 860); g.stroke(); }); } }
+  else { const C = [[300, cy, 55, 38, 12], [780, cy, 55, 96, 6]]; C.forEach(([x, y, r, rr_, n], j) => { g.fillStyle = j ? PK : CY; g.beginPath(); g.arc(x, y, r, 0, 7); g.fill(); g.fillStyle = '#ffffff88';
+      for (let i = 0; i < n; i++) { const a = i / n * 6.283, d = j ? 100 + 20 : r + 20 + rr_ * 1.2; g.beginPath(); g.arc(x + Math.cos(a) * (j ? 150 : 130), y + Math.sin(a) * (j ? 150 : 130), j ? 24 : 70, 0, 7); g.fill(); } });
+    if (rv) { g.strokeStyle = GOLD; g.lineWidth = 8; g.globalAlpha = dp; [300, 780].forEach(x => { g.beginPath(); g.arc(x, cy, 62, 0, 7); g.stroke(); }); } }
+  g.restore();
+  if (t < T) countdown(W / 2, 1000, 56, t, T); else { tx(sp.rt || 'THEY ARE THE SAME!', W / 2, 960, 84, GR, { maxW: 980, sc: eb((t - T) / 0.5), glow: GR, stroke: '#000000aa', sw: 10 }); confetti(t, T, 15, W / 2, 640, 26); }
+};
+K.riddle = (sp, t) => {
+  const T = sp.T || 4.2, Q = [].concat(sp.q);
+  tx(sp.ttl || 'CAN YOU SOLVE IT?', W / 2, 225, 62, GOLD, { maxW: 980, stroke: '#000000aa', sw: 10, glow: GOLD, gb: 20 });
+  rr(70, 330, W - 140, 600, 50, '#00000055', { line: th[2], lw: 4 });
+  let ls = []; Q.forEach(q => wrap(q, 880, 76).forEach(x => ls.push(x))); const y0 = 630 - (ls.length - 1) * 50;
+  ls.forEach((ln, i) => tx(ln, W / 2, y0 + i * 100, 76, WH, { maxW: 900, a: eo((t - 0.2 - i * 0.35) / 0.4), sc: 0.9 + 0.1 * eo((t - 0.2 - i * 0.35) / 0.4) }));
+  if (t < T) countdown(W / 2, 1010, 56, t, T); else if (!sp.noans) { const p = eb((t - T) / 0.5); rr(90, 980, W - 180, 150, 40, GR + '33', { line: GR, lw: 6, glow: GR, a: p }); tx(sp.a, W / 2, 1055, 84, GR, { maxW: 900, sc: p, glow: GR, stroke: '#000000aa', sw: 8 }); confetti(t, T, 44, W / 2, 1055, 32); }
+};
+K.result = (sp, t) => {
+  const cx = W / 2, cy = 640, p = eo(t / 1.3);
+  tx(sp.ttl || 'YOUR SCORE', cx, 230, 70, GOLD, { maxW: 980, stroke: '#000000aa', sw: 10, glow: GOLD, gb: 20, sc: eb(t / 0.4) });
+  if (sp.val !== undefined && sp.val !== null) {
+    g.save(); g.lineWidth = 46; g.lineCap = 'round'; g.strokeStyle = '#ffffff22'; g.beginPath(); g.arc(cx, cy, 250, Math.PI * 0.75, Math.PI * 2.25); g.stroke();
+    g.strokeStyle = GOLD; g.shadowColor = GOLD; g.shadowBlur = 30; g.beginPath(); g.arc(cx, cy, 250, Math.PI * 0.75, Math.PI * (0.75 + 1.5 * sp.val / 100 * p)); g.stroke(); g.restore();
+    tx(Math.round(sp.val * p) + (sp.u === undefined ? '%' : sp.u), cx, cy - 10, 170, WH, { stroke: '#000000aa', sw: 12, glow: th[2] });
+  } else tx(sp.e || '🏆', cx, cy, 380, WH, { sc: eb(t / 0.6), glow: GOLD, gb: 50 });
+  if (sp.lab) tx(sp.lab, cx, 990, 96, GR, { maxW: 980, sc: eb((t - 1.1) / 0.4), a: clamp((t - 1.1) * 4), glow: GR, stroke: '#000000aa', sw: 10 });
+  if (sp.tiers) sp.tiers.forEach((tr, i) => { const x = cx + (i - (sp.tiers.length - 1) / 2) * 300, on = sp.val >= parseInt(tr[0]) || sp.hit === i, a = eo((t - 1.6 - i * 0.15) / 0.3);
+    rr(x - 135, 1380, 270, 110, 30, on ? GOLD + '33' : '#ffffff12', { line: on ? GOLD : '#ffffff44', lw: 4, a }); tx(tr[0], x, 1415, 40, on ? GOLD : '#e5e7eb', { a, maxW: 240 }); tx(tr[1], x, 1460, 30, '#e5e7eb', { a, maxW: 240, w: '600' }); });
+  if (sp.cta) tx(sp.cta, cx, 1560, 52, WH, { maxW: 980, a: eo((t - 2.2) / 0.4) });
+  confetti(t, 1.1, 99, cx, cy, 56);
+};
+
+// ---- BALL RACE: a long zig-zag course in two lanes, the camera follows the leader. Ramps have boost patches (green), mud (brown) and GATES that stop a ball for a moment. Pure arithmetic, so every frame is identical wherever it is drawn. ----
+const RC = {};
+function raceSim(sp) {
+  const key = JSON.stringify([sp.seed, sp.win, sp.T, sp.n]); if (RC[key]) return RC[key];
+  const N = sp.n || 22, TOP = 90, GAP = 100, SPAN = 360, DROP = 40, RAD = 28, G = 2600, VB = 420, VIEW = 960;
+  const ramps = []; for (let k = 0; k < N; k++) { const right = k % 2 === 0, xa = right ? 60 : 60 + SPAN, xb = right ? 60 + SPAN : 60, ya = TOP + k * GAP, yb = ya + DROP; ramps.push({ xa, ya, xb, yb, L: Math.hypot(xb - xa, yb - ya) }); }
+  const FY = TOP + N * GAP + 40, COURSE = FY + 70;
+  const build = (m, gt) => { const segs = []; let t = 0, dist = 0;
+    for (let k = 0; k < N; k++) { const R = ramps[k], d = R.L / (VB * m[k]), w = gt[k];
+      segs.push({ k, ty: 'r', t0: t, t1: t + d + w, d0: dist, d1: dist + R.L, d, w }); t += d + w; dist += R.L;
+      const ny = k + 1 < N ? ramps[k + 1].ya : FY, dy = Math.max(10, ny - RAD * 0.2 - R.yb), f = Math.sqrt(2 * dy / G); segs.push({ k, ty: 'f', t0: t, t1: t + f, d0: dist, d1: dist + dy, dy }); t += f; dist += dy; }
+    return { segs, total: t, dist }; };
+  let best = null;
+  for (let a = 0; a < 60; a++) {
+    const r = mk((sp.seed || 1) * 31 + a); const gen = () => { const m = [], gt = []; for (let k = 0; k < N; k++) { m.push(0.8 + r() * 0.6); gt.push(k > 0 && r() < 0.3 ? 0.5 + r() * 0.7 : 0); } return [m, gt]; };
+    const [mA, gA] = gen(), [mB, gB] = gen(), A = build(mA, gA), B = build(mB, gB), diff = Math.abs(A.total - B.total) / Math.min(A.total, B.total);
+    if (diff > 0.02 && diff < 0.09) { best = [mA, gA, mB, gB, A, B]; break; } if (!best) best = [mA, gA, mB, gB, A, B];
+  }
+  let [ma, ga, mb, gb, A, B] = best; const wantA = (sp.win || 0) === 0;
+  if ((A.total < B.total) !== wantA) { let q = ma; ma = mb; mb = q; q = ga; ga = gb; gb = q; A = build(ma, ga); B = build(mb, gb); }
+  const sc = (sp.T || 28) / Math.min(A.total, B.total);
+  const lane = (S, m, gt) => { const segs = S.segs.map(s => ({ ...s, t0: s.t0 * sc, t1: s.t1 * sc, d: (s.d || 0) * sc, w: (s.w || 0) * sc })); const rs = []; segs.forEach(s => { if (s.ty === 'r') rs[s.k] = s; }); return { m, gt, segs, rs, total: S.total * sc }; };
+  const R = { N, ramps, FY, RAD, COURSE, VIEW, lanes: [lane(A, ma, ga), lane(B, mb, gb)], dist: A.dist, win: wantA ? 0 : 1 };
+  const FPS = 30, nF = Math.ceil(((sp.T || 28) + 12) * FPS), cam = new Float32Array(nF); let c = 0;   // camera: follows the leader, smoothly
+  for (let i = 0; i < nF; i++) { const tau = i / FPS, y = Math.max(racePos(R, 0, tau).y, racePos(R, 1, tau).y), target = Math.max(0, Math.min(COURSE - VIEW, y - 360)); c += (target - c) * 0.1; cam[i] = c; }
+  R.cam = cam; R.FPS = FPS; return RC[key] = R;
+}
+function racePos(R, li, tau) {   // -> {x, y (lane-local, WORLD y), d travelled}
+  const L = R.lanes[li], rm = R.ramps; let sg = L.segs[L.segs.length - 1];
+  if (tau <= 0) { const r0 = rm[0]; return { x: r0.xa, y: r0.ya - R.RAD - 12, d: 0 }; }
+  if (tau >= L.total) { const last = rm[R.N - 1]; return { x: last.xb, y: R.FY - R.RAD, d: R.dist, done: true }; }
+  for (const s of L.segs) if (tau >= s.t0 && tau < s.t1) { sg = s; break; }
+  const rr_ = rm[sg.k];
+  if (sg.ty === 'r') {
+    const tr = tau - sg.t0; let u; if (tr < sg.d * 0.5) u = tr / sg.d; else if (tr < sg.d * 0.5 + sg.w) u = 0.5; else u = (tr - sg.w) / sg.d; u = clamp(u);
+    const p = 0.35 * u + 0.65 * u * u, x = rr_.xa + (rr_.xb - rr_.xa) * p, y = rr_.ya + (rr_.yb - rr_.ya) * p, len = rr_.L, nx = -(rr_.yb - rr_.ya) / len, ny = (rr_.xb - rr_.xa) / len, s = ny > 0 ? -1 : 1;
+    return { x: x + nx * s * (R.RAD + 11), y: y + ny * s * (R.RAD + 11), d: sg.d0 + (sg.d1 - sg.d0) * p, hold: tr >= sg.d * 0.5 && tr < sg.d * 0.5 + sg.w };
+  }
+  const u = clamp((tau - sg.t0) / Math.max(1e-6, sg.t1 - sg.t0)), ny0 = sg.k + 1 < R.N ? rm[sg.k + 1].ya : R.FY, y0 = rr_.yb - R.RAD - 11, y1 = ny0 - R.RAD - 11;
+  return { x: rr_.xb, y: y0 + (y1 - y0) * u * u, d: sg.d0 + (sg.d1 - sg.d0) * u };
+}
+function drawBall(x, y, r, sk, spin, a = 1) {
+  g.save(); g.globalAlpha = a; g.translate(x, y);
+  if (sk[3]) { g.fillStyle = '#ffffffee'; g.beginPath(); g.arc(0, 0, r, 0, 7); g.fill(); g.rotate(spin); g.font = Math.round(r * 1.7) + 'px ' + EMOF; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(sk[3], 0, 3); }
+  else { const gr = g.createRadialGradient(-r * 0.35, -r * 0.4, r * 0.1, 0, 0, r); gr.addColorStop(0, sk[2]); gr.addColorStop(0.55, sk[1]); gr.addColorStop(1, '#00000088'); g.shadowColor = sk[1]; g.shadowBlur = 18; g.fillStyle = gr; g.beginPath(); g.arc(0, 0, r, 0, 7); g.fill(); g.shadowBlur = 0; g.rotate(spin); g.fillStyle = '#ffffff55'; g.beginPath(); g.arc(r * 0.45, 0, r * 0.2, 0, 7); g.fill(); }
+  g.restore();
+}
+K.pick = (sp, t) => {
+  const S = sp.sk, cx = W / 2;
+  tx(sp.ttl || 'PICK A BALL!', cx, 235, 92, GOLD, { maxW: 980, sc: eb(t / 0.4), stroke: '#000000aa', sw: 12, glow: GOLD, gb: 26 });
+  S.forEach((s, i) => { const x = cx + (i ? 1 : -1) * 270, y = 640 + Math.sin(t * 3 + i * 2) * 18, p = eb((t - 0.2 - i * 0.2) / 0.5);
+    for (let q = 0; q < 2; q++) { const pp = (t * 0.8 + q / 2) % 1; ring(x, y, 150 + pp * 120, s[1], (1 - pp) * 0.45, 6); }
+    drawBall(x, y, 150 * p, s, t * 1.5 * (i ? -1 : 1)); tx(s[0], x, y + 230, 70, s[1], { maxW: 440, sc: p, stroke: '#000000aa', sw: 10, glow: s[1] }); });
+  tx('VS', cx, 640, 90, WH, { stroke: '#000000aa', sw: 12, glow: th[2] });
+  tx(sp.sub || 'COMMENT YOUR PICK', cx, 960, 56, WH, { maxW: 980, a: eo((t - 0.9) / 0.4) });
+  [[0, '3'], [0.6, '2'], [1.2, '1'], [1.8, 'GO!']].map(([a, b]) => [a + (sp.cd === undefined ? 2.4 : sp.cd), b]).forEach(([T0, s]) => { const d = t - T0; if (d >= 0 && d < 0.6) tx(s, cx, 1200, s === 'GO!' ? 200 : 260, s === 'GO!' ? GR : GOLD, { sc: eb(d / 0.2), a: 1.4 - d / 0.45, stroke: '#000000aa', sw: 14, glow: s === 'GO!' ? GR : GOLD }); });
+};
+K.race = (sp, t) => {
+  const R = raceSim(sp), tau = t, S = sp.sk, LX = [50, 550], LW = 480, y0 = 215, VH = R.VIEW, T = sp.T || 28, over = tau >= T, winner = R.win;
+  const camY = R.cam[Math.min(R.cam.length - 1, Math.max(0, Math.round(tau * R.FPS)))], sy = (wy) => y0 + (wy - camY);
+  const pos = [racePos(R, 0, tau), racePos(R, 1, tau)], lead = pos[0].d === pos[1].d ? -1 : (pos[0].d > pos[1].d ? 0 : 1);
+  for (let li = 0; li < 2; li++) {
+    const s = S[li], x0 = LX[li], dim = over && li !== winner, Ln = R.lanes[li];
+    rr(x0, y0, LW, VH, 36, '#00000066', { a: dim ? 0.5 : 1 });
+    g.save(); g.beginPath(); g.roundRect(x0, y0, LW, VH, 36); g.clip();
+    for (let q = 0; q < 14; q++) { const py = sy(40 + q * 170); g.fillStyle = '#ffffff10'; for (let c = 0; c < 4; c++) { g.beginPath(); g.arc(x0 + 40 + c * 130 + (q % 2) * 60, py, 7, 0, 7); g.fill(); } }   // pegs on the wall for the feeling of speed
+    R.ramps.forEach((rp, k) => { const ya = sy(rp.ya), yb = sy(rp.yb); if (yb < y0 - 40 || ya > y0 + VH + 40) return;
+      const m = Ln.m[k], boost = m > 1.22, slow = m < 0.9, col = boost ? GR : (slow ? '#a16207' : '#e5e7ebcc'), sg = Ln.rs[k], gate = sg && sg.w > 0;
+      g.save(); g.globalAlpha = dim ? 0.5 : 1; g.lineCap = 'round'; g.lineWidth = 22; g.strokeStyle = col; if (boost || slow) { g.shadowColor = col; g.shadowBlur = 16; } g.beginPath(); g.moveTo(x0 + rp.xa, ya); g.lineTo(x0 + rp.xb, yb); g.stroke(); g.restore();
+      if (boost || slow) tx(boost ? '⚡' : '🐌', x0 + (rp.xa + rp.xb) / 2, (ya + yb) / 2 - 36, 38, WH, { a: dim ? 0.5 : 1 });
+      if (gate) { const pf = 0.44, gx = x0 + rp.xa + (rp.xb - rp.xa) * pf, gy = ya + (yb - ya) * pf, tOpen = sg.t0 + sg.d * 0.5 + sg.w - 0.25, op = clamp((tau - tOpen) / 0.25);
+        g.save(); g.translate(gx, gy); g.rotate(op * 1.45 * (rp.xb > rp.xa ? 1 : -1)); g.lineCap = 'round'; g.lineWidth = 14; g.strokeStyle = op > 0.9 ? '#ffffff55' : '#ef4444'; g.shadowColor = '#ef4444'; g.shadowBlur = op > 0.9 ? 0 : 14; g.beginPath(); g.moveTo(0, 0); g.lineTo(0, -78); g.stroke(); g.restore();
+        if (op < 0.5) tx('🚧', gx, gy - 96, 34, WH, { a: dim ? 0.5 : 1 }); } });
+    const fy = sy(R.FY + 4); if (fy < y0 + VH + 30) { for (let q = 0; q < 12; q++) { g.fillStyle = (q % 2) ? '#ffffff' : '#111827'; g.fillRect(x0 + 20 + q * 36, fy, 36, 24); g.fillStyle = (q % 2) ? '#111827' : '#ffffff'; g.fillRect(x0 + 20 + q * 36, fy + 24, 36, 24); } }
+    g.restore();
+    rr(x0, y0, LW, VH, 36, null, { line: s[1], lw: 5, glow: s[1], gb: 16, a: dim ? 0.5 : 1 });
+    tx(s[0], x0 + LW / 2, y0 - 28, 50, s[1], { maxW: 440, stroke: '#000000aa', sw: 8 });
+  }
+  for (let li = 0; li < 2; li++) {
+    const s = S[li], x0 = LX[li], p = pos[li], dim = over && li !== winner, ox = x0 + p.x, oy = sy(p.y);
+    g.save(); g.beginPath(); g.roundRect(x0, y0, LW, VH, 36); g.clip();
+    for (let q = 7; q >= 1; q--) { const pq = racePos(R, li, tau - q * 0.04); drawBall(x0 + pq.x, sy(pq.y), 28 * (1 - q * 0.07), s, 0, 0.12 + (7 - q) * 0.015); }
+    const bounce = over && li === winner ? Math.abs(Math.sin((tau - T) * 6)) * 40 : 0;
+    drawBall(ox, oy - bounce, 28, s, p.d / 28, dim ? 0.5 : 1);
+    if (p.hold) tx('💢', ox + 34, oy - 40, 36, WH, { sc: 0.9 + 0.2 * Math.sin(t * 20) });
+    if (lead === li && !over) tx('👑', ox, oy - 64, 46, WH, { sc: 0.9 + 0.1 * Math.sin(t * 8) });
+    g.restore();
+  }
+  [0, 1].forEach(li => { const s = S[li], pr = clamp(pos[li].d / R.dist), by = 1420 + li * 66; rr(60, by - 14, W - 120, 30, 15, '#ffffff22'); rr(60, by - 14, Math.max(30, (W - 120) * pr), 30, 15, s[1], { glow: s[1] }); tx(s[0] + '  ' + Math.round(pr * 100) + '%', 70, by - 38, 30, '#e5e7eb', { al: 'left', w: '600' }); });
+  if (t < 0.8) tx('GO!', W / 2, 640, 260, GR, { sc: eb(t / 0.2), a: 1.6 - t / 0.5, stroke: '#000000aa', sw: 14, glow: GR });
+  if (over) { const d = tau - T, s = S[winner]; confetti(t, t - d, 3 + winner, LX[winner] + LW / 2, 700, 70); confetti(t, t - d + 0.25, 8, W / 2, 500, 50);
+    const p = eb(d / 0.5); rr(90, 480, W - 180, 190, 44, '#000000cc', { line: s[1], lw: 8, glow: s[1], a: clamp(d * 4) }); tx(s[0] + ' WINS!', W / 2, 575, 120, s[1], { maxW: 900, sc: p, stroke: '#000000', sw: 14, glow: s[1], gb: 40, a: clamp(d * 4) }); }
+};
+// ---- THE TIMELINE: one video = one continuous screen. Scenes only decide how long each part lasts (the voice length + think time), the picture never cuts: every part slides up from the bottom edge and the old one slides away at the top. ----
+const HOLD = { odd: 1.8, math: 2.0, count: 2.2, scramble: 2.0, illusion: 2.2, leet: 2.2, memory: 1.8 };
+const THINK = { odd: 2.6, math: 2.6, count: 3.0, scramble: 2.6, illusion: 2.8, leet: 2.2, memory: 1.8 };
+function lenOf(sp, v) {   // how long a scene lasts: the voice + a little air + the time the viewer needs to play
+  const b = v + 0.45;
+  if (sp.mn !== undefined) return Math.max(b + (sp.pad || 0), sp.mn);
+  if (sp.k === 'hook') return Math.max(3.8, b + 0.4);
+  if (THINK[sp.k] !== undefined) return b + THINK[sp.k] + HOLD[sp.k];
+  if (sp.k === 'riddle') return sp.T > 0 ? b + 3.6 : b + 1.2;
+  if (sp.k === 'stroop') return sp.rv ? b + sp.r.length * 0.18 + 1.0 : Math.max(b, (sp.st || 0.5) + sp.r.length * sp.per) + 0.7;
+  if (sp.k === 'pick') return Math.max(b + 0.2, 4.6);
+  if (sp.k === 'result') return Math.max(4.6, b + 1.2);
+  return b + 1;
+}
+function prep(sp, L) {   // fill in the times that depend on the scene length
+  const o = Object.assign({}, sp);
+  if (HOLD[o.k] !== undefined) { const T = L - HOLD[o.k]; if (o.k === 'leet') o.at = T; else if (o.k === 'memory') { o.rv = T; o.show = Math.min(o.show || 2, T - 1.2); } else o.T = T; }
+  if (o.k === 'riddle' && o.T > 0) { o.T = L - 0.05; o.noans = true; }
+  if (o.k === 'stroop' && o.rv) o.st = -(o.r.length * o.per);
+  if (o.k === 'pick') o.cd = L - 2.4;
+  return o;
+}
+function gprep(g0, sc, i, j, starts, t0, t1) {   // a group of scenes that share ONE screen (reading scroll, hidden-word grid, ball race)
+  const o = Object.assign({}, sc[i].sp);
+  if (g0 === 'sc') { o.S = t1 - t0; o.ms = []; for (let k = i + 1; k <= j; k++) o.ms.push([starts[k] - t0, sc[k].sp.pct, sc[k].sp.bt, sc[k].sp.sb]); }
+  else if (g0 === 'race') { o.T = starts[j] - t0 - 0.25; o.dur = t1 - t0; }
+  else if (g0 === 'w') { const s1 = i + 1 <= j ? starts[i + 1] - t0 : 6; o.cdT = s1; o.rv = [s1 + 0.8, s1 + 1.7, s1 + 2.6]; o.foc = []; for (let k = i + 2; k <= j; k++) o.foc.push([starts[k] - t0, sc[k].sp.f]); }
+  return o;
+}
+const DOWN = { hook: 140, odd: 190, count: 190, math: 200, memory: 200, stroop: 190, scramble: 200, illusion: 200, riddle: 190, leet: 200, result: 120, pick: 140 };   // the play area sits a little lower, so it is not squeezed against the top of the phone
+function drawSec(sp, lt) { g.save(); g.translate(0, DOWN[sp.k] || 0); (K[sp.k] || K.hook)(sp, lt); g.restore(); hud(sp, lt); }
+let TL = null;
+window.setup = (scenes) => {   // scenes: [{sp, v}]  v = length of the voice in seconds -> {lens, starts, D, cues}
+  const n = scenes.length, lens = [], starts = [], secs = []; let acc = 0;
+  scenes.forEach((s) => { const L = lenOf(s.sp, s.v); lens.push(L); starts.push(acc); acc += L; });
+  let i = 0;
+  while (i < n) { const sp = scenes[i].sp; let j = i; if (sp.g) while (j + 1 < n && scenes[j + 1].sp.g === sp.g) j++;
+    const t0 = starts[i], t1 = starts[j] + lens[j], o = sp.g ? gprep(sp.g, scenes, i, j, starts, t0, t1) : prep(sp, lens[i]);
+    secs.push({ t0, t1, sp: o, first: i === 0, last: j === n - 1 }); i = j + 1; }
+  TL = { secs, D: acc, lens, starts }; TL.cues = cuesAll(TL);
+  return { lens, starts, D: acc, cues: TL.cues };
+};
+function cuesAll(tl) {
+  const c = []; const add = (t, k, v) => c.push({ t: Math.max(0, +t.toFixed(3)), k, v: v === undefined ? 1 : v });
+  tl.secs.forEach(sec => { const sp = sec.sp, T0 = sec.t0, a = (t, k, v) => add(T0 + t, k, v), tk = (T) => { for (let s = 3; s >= 1; s--) if (T - s > 0.3) a(T - s, 'tick', 0.7); };
+    if (!sec.first) a(0, 'whoosh', 0.8);
+    switch (sp.k) {
+      case 'hook': a(0.15, 'pop'); break;
+      case 'odd': case 'math': case 'count': case 'scramble': case 'illusion': tk(sp.T); a(sp.T, 'ding'); break;
+      case 'leet': tk(sp.at); a(sp.at, 'ding'); break;
+      case 'memory': a(0.2, 'pop'); a(sp.show, 'tick'); tk(sp.rv); a(sp.rv, 'ding'); break;
+      case 'riddle': if (sp.noans) tk(sp.T); else a(0.2, 'ding'); break;
+      case 'stroop': sp.r.forEach((q, i) => { if (sp.rv) a(i * 0.18 + 0.1, 'pop', 0.7); else a(sp.st + i * sp.per, 'pop', 0.8); }); break;
+      case 'words': (sp.rv || []).forEach(r => { if (r != null) a(r, 'ding', 0.8); }); if (sp.cdT) tk(sp.cdT); (sp.foc || []).forEach(f => a(f[0], 'chime', 0.7)); break;
+      case 'scroll': a(0.1, 'go'); (sp.ms || []).forEach(m => a(m[0], 'chime')); a(sp.S, 'ding', 0.6); break;
+      case 'pick': a(sp.cd, 'tick'); a(sp.cd + 0.6, 'tick'); a(sp.cd + 1.2, 'tick'); a(sp.cd + 1.8, 'go'); break;
+      case 'race': { a(0.05, 'go', 0.8); const R = raceSim(sp); R.lanes.forEach((Ln) => Ln.rs.forEach((sg, k) => { if (!sg) return; if (sg.w > 0) a(sg.t0 + sg.d * 0.5, 'clunk', 0.8); else if (Ln.m[k] > 1.22) a(sg.t0, 'boost', 0.5); })); a(sp.T, 'fanfare'); a(0, 'rumble', sp.T); break; }
+      case 'result': a(0.5, 'chime'); break;
+    } });
+  return c;
+}
+window.frame = (t) => {
+  const D = TL.D; t = Math.min(Math.max(t, 0), D - 0.001);
+  th = TH[TL.secs[0].sp.th] || TH.violet; BGK = TL.secs[0].sp.bk || 'stage'; g = G0; g.setTransform(1, 0, 0, 1, 0, 0); bg(t);
+  TL.secs.forEach(sec => {
+    if (t < sec.t0 || t >= sec.t1 + 0.5) return;
+    const lt = t - sec.t0, e = sec.first ? 1 : eo(lt / 0.65), x = sec.last ? 0 : eo((t - sec.t1) / 0.45);
+    if (e >= 1 && x <= 0) { drawSec(sec.sp, lt); return; }
+    g = OG; g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, W, H); drawSec(sec.sp, lt);
+    g = G0; G0.save(); G0.globalAlpha = Math.max(0, e * (1 - x)); G0.drawImage(oc, 0, (1 - e) * 380 - x * 300); G0.restore();
+  });
+  window.ready = true; return true;
+};
+window.ready = true;
+
+</script>
