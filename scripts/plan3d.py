@@ -5,7 +5,7 @@ finds the model in this repo, renders each scene as a vertical clip with scripts
 ({"scene number": "clips3d/s<N>.mp4"}) which assemble.py picks up. A scene that cannot be rendered simply keeps its normal picture.
 Run from the repo root:   python scripts/plan3d.py            (render)
                           python scripts/plan3d.py --check    (one short clip per model, to look at them)"""
-import json, os, re, subprocess, sys
+import base64, json, os, re, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CAT = json.load(open(os.path.join(ROOT, "scripts", "catalog.json"), encoding="utf-8"))
@@ -69,6 +69,33 @@ def parse_directives(manifest):
     return out
 
 
+def parse_games(manifest):
+    """Brain-game scenes: 'scale-GAME d=<base64 json>' -> {scene number: spec}. scripts/render3d/game.html draws them."""
+    out = {}
+    for sc in manifest.get("scenes") or []:
+        txt = str(sc.get("overlay_anims") or "")
+        m = re.search(r"(?i)scale-game\s+([^;]*)", txt)
+        if not m:
+            continue
+        kv = dict((a.lower(), b) for a, b in re.findall(r"(\w+)=([^\s;]+)", m.group(1)))
+        try:
+            raw = kv["d"].replace("-", "+").replace("_", "/")
+            raw += "=" * (-len(raw) % 4)
+            out[int(sc["scene_number"])] = json.loads(base64.b64decode(raw).decode("utf-8"))
+        except Exception as e:
+            print(f"scene {sc.get('scene_number')}: game data could not be read ({e}) - keeps its picture")
+    return out
+
+
+def run_game_jobs(jobs):
+    for j in jobs:
+        os.makedirs(os.path.dirname(os.path.join(ROOT, j["out"])), exist_ok=True)
+    jf = os.path.join(ROOT, "jobsgame.json")
+    json.dump([{**j, "out": os.path.join(ROOT, j["out"])} for j in jobs], open(jf, "w"))
+    r = subprocess.run(["node", "render_games.js", jf], cwd=os.path.join(ROOT, "scripts", "render3d"))
+    return r.returncode
+
+
 def build_job(num, kv, out_path, seconds=CLIP_SECONDS):
     key = resolve_key(kv.get("model"))
     if not key:
@@ -129,16 +156,26 @@ def main():
         j = build_job(num, kv, f"clips3d/s{num}.mp4")
         if j:
             jobs.append(j)
-    if not jobs:
+    games = parse_games(manifest)
+    print(f"game scenes asked for: {sorted(games)}")
+    gjobs = []
+    last = max(games) if games else 0
+    for num, spec in sorted(games.items())[:12]:
+        gjobs.append({"out": f"clips3d/s{num}.mp4", "spec": spec, "seconds": 9.5 if num == last else 8.0, "fps": 30, "_scene": num})
+    if not jobs and not gjobs:
         return
-    rc = run_jobs(jobs)
+    rc = run_jobs(jobs) if jobs else 0
+    if gjobs:
+        rc = run_game_jobs(gjobs) or rc
+        jobs = jobs + gjobs
     done = {}
     used = []
     for j in jobs:
         p = os.path.join(ROOT, j["out"])
         if os.path.exists(p) and os.path.getsize(p) > 20000:
             done[str(j["_scene"])] = j["out"]
-            used.append(j["_key"])
+            if "_key" in j:
+                used.append(j["_key"])
     json.dump(done, open(os.path.join(ROOT, "clips3d.json"), "w"))
     credits = [CAT.get("credits", {}).get(k) for k in dict.fromkeys(used)]
     credits = [c for c in credits if c]
