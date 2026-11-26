@@ -8,8 +8,12 @@ Run from the repo root:   python scripts/plan3d.py            (render)
 import base64, json, os, re, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CAT = json.load(open(os.path.join(ROOT, "scripts", "catalog.json"), encoding="utf-8"))
-MODELS = CAT["models"]
+try:
+    CAT = json.load(open(os.path.join(ROOT, "scripts", "catalog.json"), encoding="utf-8"))
+except Exception as _e:                      # the game videos do not need the 3D catalog
+    print(f"3D catalog not found ({_e}) - 3D models are skipped, games still work")
+    CAT = {"models": {}, "presets": [], "envs": [], "directional": []}
+MODELS = CAT.get("models", {})
 EXT = (".glb", ".gltf", ".obj", ".fbx")
 CLIP_SECONDS = 6.5
 W, H = 720, 1280
@@ -133,6 +137,59 @@ def run_jobs(jobs):
     return r.returncode
 
 
+def probe_seconds(url):
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(url)], capture_output=True, text=True, timeout=90)
+        return float((r.stdout or "0").strip().split()[0])
+    except Exception:
+        return 0.0
+
+
+def get_voice_lengths(manifest):
+    """{scene number: seconds of voice}, measured from the real voice files, so the game is timed to the real narration."""
+    url, key, ep = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_SERVICE_KEY"), manifest.get("episodeId")
+    if not (url and key and ep):
+        print("voice lengths: no Supabase access here - using estimates")
+        return {}
+    try:
+        import requests
+        rows = requests.get(f"{url}/rest/v1/assets?episode_id=eq.{ep}&type=eq.voice_line&status=eq.completed&select=line_index,scene_number,file_url",
+                            headers={"apikey": key, "Authorization": f"Bearer {key}"}, timeout=60).json()
+        out = {}
+        for a in rows:
+            d = probe_seconds(a.get("file_url"))
+            if d > 0:
+                out[int(a["scene_number"])] = out.get(int(a["scene_number"]), 0.0) + d
+        print("real voice lengths:", {k: round(v, 1) for k, v in sorted(out.items())})
+        return out
+    except Exception as e:
+        print(f"voice lengths could not be read ({e}) - using estimates")
+        return {}
+
+
+def cut_game(job, done):
+    """The whole game video was drawn as ONE film. Cut it into one clip per scene (the clips join up seamlessly) and tell assemble.py how long each must last."""
+    full = os.path.join(ROOT, job["out"])
+    try:
+        plan = json.load(open(full + ".plan.json"))
+    except Exception:
+        return None
+    if not (os.path.exists(full) and os.path.getsize(full) > 20000):
+        return None
+    lens = {}
+    for idx, n in enumerate(job["_nums"]):
+        outp = f"clips3d/s{n}.mp4"
+        r = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{plan['starts'][idx]:.3f}", "-i", full, "-t", f"{plan['lens'][idx]:.3f}",
+                            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-ar", "44100", "-ac", "2",
+                            os.path.join(ROOT, outp)])
+        if r.returncode == 0 and os.path.exists(os.path.join(ROOT, outp)):
+            done[str(n)] = outp
+            lens[str(n)] = round(plan["lens"][idx], 3)
+    json.dump({"len": lens}, open(os.path.join(ROOT, "games.json"), "w"))
+    print(f"game film {plan['D']:.1f}s cut into scenes: {lens}")
+    return lens
+
+
 def main():
     os.chdir(ROOT)
     if "--check" in sys.argv:
@@ -158,18 +215,29 @@ def main():
             jobs.append(j)
     games = parse_games(manifest)
     print(f"game scenes asked for: {sorted(games)}")
-    gjobs = []
-    last = max(games) if games else 0
-    for num, spec in sorted(games.items())[:12]:
-        gjobs.append({"out": f"clips3d/s{num}.mp4", "spec": spec, "seconds": 9.5 if num == last else 8.0, "fps": 30, "_scene": num})
+    gjobs, game_plan = [], None
+    all_nums = sorted(int(sc["scene_number"]) for sc in (manifest.get("scenes") or []) if str(sc.get("scene_number", "")).strip() != "")
+    if games and sorted(games) == all_nums:          # a game video: EVERY scene belongs to ONE continuous screen
+        nums = sorted(games)
+        voice = get_voice_lengths(manifest)
+        scenes = []
+        for n in nums:
+            v = voice.get(n)
+            if not v:
+                v = float(games[n].get("ed") or 3.5)
+                print(f"scene {n}: voice length not found, using the estimate {v:.1f}s")
+            scenes.append({"sp": games[n], "v": v})
+        gjobs.append({"out": "clips3d/game_full.mp4", "scenes": scenes, "fps": 30, "_nums": nums})
+    elif games:
+        print("::warning::some scenes have no game data - the game screen is not drawn")
     if not jobs and not gjobs:
         return
     rc = run_jobs(jobs) if jobs else 0
-    if gjobs:
-        rc = run_game_jobs(gjobs) or rc
-        jobs = jobs + gjobs
     done = {}
     used = []
+    if gjobs:
+        rc = run_game_jobs(gjobs) or rc
+        game_plan = cut_game(gjobs[0], done)
     for j in jobs:
         p = os.path.join(ROOT, j["out"])
         if os.path.exists(p) and os.path.getsize(p) > 20000:
