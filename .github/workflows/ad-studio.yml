@@ -79,7 +79,8 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_BUCKET: ${{ secrets.SUPABASE_BUCKET }}
         run: |
-          B="${SUPABASE_BUCKET:-betrayer-assets}"
+          SUPABASE_URL=$(printf '%s' "$SUPABASE_URL" | tr -d '[:space:]'); SUPABASE_SERVICE_KEY=$(printf '%s' "$SUPABASE_SERVICE_KEY" | tr -d '[:space:]')
+          B=$(printf '%s' "${SUPABASE_BUCKET:-betrayer-assets}" | tr -d '[:space:]'); B="${B:-betrayer-assets}"
           RUN="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           if ! curl -s "$SUPABASE_URL/storage/v1/object/$B/${{ inputs.prefix }}/done.json" -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" | grep -q '"status"'; then
             printf '{"status":"error","error":"the GitHub job crashed before it could finish. Open %s to see the red step."}' "$RUN" > /tmp/done.json
