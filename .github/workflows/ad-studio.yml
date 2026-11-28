@@ -1,0 +1,72 @@
+name: Ad Studio
+
+on:
+  workflow_dispatch:
+    inputs:
+      prefix:
+        description: 'Storage folder of the job, e.g. ads/6430369772_1732800000'
+        required: true
+        type: string
+
+concurrency:
+  group: ad-${{ inputs.prefix }}
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ffmpeg
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+            URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz"
+            ok=0
+            for i in 1 2 3; do
+              if curl -fsSL --retry 3 --retry-delay 3 --connect-timeout 20 --max-time 240 -o "$RUNNER_TEMP/ffmpeg.tar.xz" "$URL"; then ok=1; break; fi
+              sleep 5
+            done
+            if [ "$ok" = "1" ]; then
+              mkdir -p "$RUNNER_TEMP/ffmpeg-static"
+              tar -xJf "$RUNNER_TEMP/ffmpeg.tar.xz" -C "$RUNNER_TEMP/ffmpeg-static"
+              sudo cp "$RUNNER_TEMP"/ffmpeg-static/*/bin/ffmpeg "$RUNNER_TEMP"/ffmpeg-static/*/bin/ffprobe /usr/local/bin/
+            else
+              timeout 240 sudo apt-get -o Acquire::Retries=1 install -y --no-install-recommends ffmpeg || true
+            fi
+          fi
+          command -v ffmpeg && command -v ffprobe || { echo "ffmpeg NOT installed"; exit 1; }
+
+      - name: Install Python packages
+        run: pip install --quiet numpy opencv-python-headless onnxruntime pillow requests
+
+      - name: Cut-out models (cached)
+        uses: actions/cache@v4
+        with:
+          path: scripts/studio/models
+          key: ad-studio-models-v1
+
+      - name: Download models and fonts if missing
+        run: |
+          mkdir -p scripts/studio/models scripts/studio/fonts
+          B=https://github.com/danielgatis/rembg/releases/download/v0.0.0
+          for m in u2net_human_seg.onnx isnet-general-use.onnx; do
+            [ -s scripts/studio/models/$m ] || curl -fsSL --retry 4 --retry-delay 4 -o scripts/studio/models/$m $B/$m
+          done
+          ls -la scripts/studio/models
+          G=https://raw.githubusercontent.com/google/fonts/main/ofl/poppins
+          for f in Poppins-Bold.ttf Poppins-SemiBold.ttf Poppins-Light.ttf; do
+            [ -s scripts/studio/fonts/$f ] || curl -fsSL --retry 3 -o scripts/studio/fonts/$f $G/$f || echo "font $f not downloaded, a fallback font will be used"
+          done
+
+      - name: Make the ad
+        env:
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_BUCKET: ${{ secrets.SUPABASE_BUCKET }}
+        run: python scripts/studio/run_job.py "${{ inputs.prefix }}"
