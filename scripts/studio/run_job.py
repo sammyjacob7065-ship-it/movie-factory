@@ -25,8 +25,16 @@ SUPPORTED = ('pouch', 'box', 'flat')
 # ----------------------------------------------------------------------------- storage
 def sb_get(path):
     import requests
-    r = requests.get(f'{SB_URL}/storage/v1/object/{BUCKET}/{path}', headers={'Authorization': f'Bearer {SB_KEY}'}, timeout=120)
-    r.raise_for_status(); return r.content
+    last = None
+    for url, hdr in ((f'{SB_URL}/storage/v1/object/public/{BUCKET}/{path}', {}),
+                     (f'{SB_URL}/storage/v1/object/{BUCKET}/{path}', {'Authorization': f'Bearer {SB_KEY}', 'apikey': SB_KEY})):
+        try:
+            r = requests.get(url, headers=hdr, timeout=120)
+            if r.status_code == 200 and len(r.content) > 0: return r.content
+            last = f'{r.status_code} {r.text[:120]}'
+        except Exception as e:
+            last = str(e)[:120]
+    raise RuntimeError(f'could not download {path}: {last}')
 
 
 def sb_put(path, data, ctype):
@@ -38,10 +46,26 @@ def sb_put(path, data, ctype):
 
 
 # ----------------------------------------------------------------------------- cut-outs
+def read_picture(path):
+    """Reads jpg/png/webp/bmp/tiff/(many others through PIL). Returns BGR or BGRA uint8, or raises with what the file really was."""
+    data = open(path, 'rb').read()
+    img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_UNCHANGED)
+    if img is not None: return img
+    try:
+        from PIL import Image, ImageOps
+        import io
+        im = Image.open(io.BytesIO(data)); im = ImageOps.exif_transpose(im)
+        im = im.convert('RGBA' if ('A' in im.getbands() or im.mode == 'P') else 'RGB')
+        arr = np.array(im)
+        return cv2.cvtColor(arr, cv2.COLOR_RGBA2BGRA if arr.shape[2] == 4 else cv2.COLOR_RGB2BGR)
+    except Exception:
+        pass
+    raise RuntimeError(f'cannot read picture {os.path.basename(path)}: {len(data)} bytes, starts with {data[:24]!r}')
+
+
 def prepare_cutout(path, out_png, note):
     """Photo -> BGRA PNG, cropped to the object. A photo that already has a transparent background is used as it is."""
-    img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
-    if img is None: raise RuntimeError(f'cannot read picture {os.path.basename(path)}')
+    img = read_picture(path)
     if img.ndim == 2: img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
     if img.shape[2] == 4 and (img[..., 3] < 250).mean() > 0.05:
         bgr, a = img[..., :3], img[..., 3].astype(np.float32) / 255
@@ -152,7 +176,7 @@ def run(job, get, put, work):
     # 4) render
     import ad_render
     out = os.path.join(work, 'ad_master.mp4'); sheet = os.path.join(work, 'sheet.jpg')
-    r = ad_render.Renderer(spec, float(os.environ.get('AD_RES', '1.0'))); qa += r.render(out, None, None, sheet)
+    r = ad_render.Renderer(spec, float(os.environ.get('AD_RES', '0.67'))); qa += r.render(out, None, None, sheet)
     ok = probe_checks(out, spec, bool(voice), qa)
     if not ok: raise RuntimeError('the render finished without a video stream')
     tg = os.path.join(work, 'ad_telegram.mp4'); small_copy(out, tg, spec['aspect'] == '9:16')
