@@ -105,7 +105,7 @@ class Product:
         if fr.shape[2] == 3: fr = np.dstack([fr, np.full(fr.shape[:2], 255, np.uint8)])
         self.front_src = fr
         ar = fr.shape[1] / fr.shape[0]
-        maxh = 0.50 * H if W < H else 0.62 * H
+        maxh = 0.56 * H if W < H else 0.62 * H
         maxw = 0.56 * W if W < H else 0.30 * W
         PH = maxh; PW = PH * ar
         if PW > maxw: PW = maxw; PH = PW / ar
@@ -220,6 +220,7 @@ class Product:
 
 # ----------------------------------------------------------------------------- text engine
 class TextBlock:
+    LIGHT = False
     ZONES = {'top': 0.12, 'below': 0.0, 'left': 0.5, 'right': 0.5, 'behind': 0.42}
     ALIAS = {'bottom': 'below', 'center': 'below'}
 
@@ -295,7 +296,7 @@ class TextBlock:
         pal_col = self.color
         if self.col_final is None:
             # contrast: sample what is under the text the first time it shows
-            L = bg_lum_fn(self.rect); self.col_final = (245, 243, 240) if L < 0.55 else (22, 22, 24)
+            L = bg_lum_fn(self.rect); self.col_final = (245, 243, 240) if L < (0.30 if TextBlock.LIGHT else 0.78) else (22, 22, 24)   # a dark stage keeps light text even over the product's reflection
             if pal_col and (self.zone == 'behind' or self.forced): self.col_final = hex2bgr(pal_col)
         col = self.col_final
         for i, line in enumerate(self.lines):
@@ -423,7 +424,15 @@ def macro_possible(prod, shot, W, H):
     box = shot.get('macro_box') or [0.15, 0.30, 0.85, 0.75]
     fh, fw = prod.front_src.shape[:2]; asp = W / H
     cw = max((box[2] - box[0]) * fw, (box[3] - box[1]) * fh * asp) * 1.15
-    return (W / cw) <= 2.3
+    if (W / cw) > 2.3: return False
+    # a zoom into a plain area (a blank screen, a flat colour) is a white or empty frame: only zoom where there is detail
+    x0, y0, x1, y1 = int(box[0] * fw), int(box[1] * fh), int(box[2] * fw), int(box[3] * fh)
+    crop = prod.front_src[y0:y1, x0:x1]
+    if crop.size:
+        g = cv2.cvtColor(crop[..., :3].astype(np.uint8), cv2.COLOR_BGR2GRAY).astype(np.float32)
+        m = (crop[..., 3] > 200) if crop.shape[2] == 4 else np.ones(g.shape, bool)
+        if m.sum() > 100 and float(g[m].std()) < 22: return False
+    return True
 
 
 # ----------------------------------------------------------------------------- the renderer
@@ -440,7 +449,7 @@ class Renderer:
         self.W, self.H = int(W * res) // 2 * 2, int(H * res) // 2 * 2
         self.spec = spec; self.fps = int(spec.get('fps', 30)); W, H = self.W, self.H
         self.pal = {'bg': '#0b0a0d', 'accent': '#e01a24', 'text': '#f2efe9', **(spec.get('palette') or {})}
-        self.style = spec.get('style', 'dark_studio')
+        self.style = spec.get('style', 'dark_studio'); TextBlock.LIGHT = (self.style == 'light_studio')
         self.base, self.glow, self.tint, self.floor_y = make_stage(W, H, self.style, self.pal, spec.get('background'))
         self.prod = Product(W, H, spec, self.pal)
         self.yy, self.xx = np.mgrid[0:H, 0:W].astype(np.float32)
@@ -520,6 +529,7 @@ class Renderer:
         ys = None; rect = None; a_prod = None
         if not macro:
             rgb, a, rect = self.prod.render(P['yaw'], cx, base, P['scale'])
+            rgb = np.where(rgb > 205, 205 + (rgb - 205) * 0.45, rgb)      # highlight shoulder: a white screen stays bright but never burns out
             x0, y0, x1, y1 = rect; a = a * P['fade']
             # shadow + reflection
             sh = np.zeros((H, W), np.float32)
