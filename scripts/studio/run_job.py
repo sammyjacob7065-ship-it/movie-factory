@@ -23,6 +23,14 @@ SUPPORTED = ('pouch', 'box', 'flat')
 
 
 # ----------------------------------------------------------------------------- storage
+def unwrap(data):
+    """n8n's code runner can save a file as the text {"type":"Buffer","data":[...]}: turn that back into the real bytes."""
+    if data[:1] == b'{' and b'"Buffer"' in data[:40] and b'"data"' in data[:60]:
+        try: return bytes(json.loads(data.decode('utf8'))['data'])
+        except Exception: return data
+    return data
+
+
 def sb_get(path):
     import requests
     last = None
@@ -30,7 +38,7 @@ def sb_get(path):
                      (f'{SB_URL}/storage/v1/object/{BUCKET}/{path}', {'Authorization': f'Bearer {SB_KEY}', 'apikey': SB_KEY})):
         try:
             r = requests.get(url, headers=hdr, timeout=120)
-            if r.status_code == 200 and len(r.content) > 0: return r.content
+            if r.status_code == 200 and len(r.content) > 0: return unwrap(r.content)
             last = f'{r.status_code} {r.text[:120]}'
         except Exception as e:
             last = str(e)[:120]
