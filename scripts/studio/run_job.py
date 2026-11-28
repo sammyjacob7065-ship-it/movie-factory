@@ -71,6 +71,10 @@ def read_picture(path):
     raise RuntimeError(f'cannot read picture {os.path.basename(path)}: {len(data)} bytes, starts with {data[:24]!r}')
 
 
+def role_name(path):
+    return os.path.basename(path).replace('raw_', '').replace('.img', '') + ' picture'
+
+
 def prepare_cutout(path, out_png, note):
     """Photo -> BGRA PNG, cropped to the object. A photo that already has a transparent background is used as it is."""
     img = read_picture(path)
@@ -82,11 +86,11 @@ def prepare_cutout(path, out_png, note):
         bgr = img[..., :3]
         big = max(bgr.shape[:2])
         if big > 2000: bgr = cv2.resize(bgr, None, fx=2000 / big, fy=2000 / big, interpolation=cv2.INTER_AREA)
-        F, a = cutout.cutout(bgr, 'still'); bgr = F
-        cov = float((a > 0.5).mean())
-        if cov < 0.06 or cov > 0.985:
-            note.append(f'{os.path.basename(path)}: the background could not be separated cleanly, the whole picture is used')
-            a = np.ones(bgr.shape[:2], np.float32)
+        try:
+            bgr, a, how = cutout.product_cutout(bgr)
+            if how != 'model': note.append(f'{os.path.basename(path)}: cut out with the backdrop method')
+        except RuntimeError as e:
+            raise RuntimeError(f'{role_name(path)}: {e}')
     ys, xs = np.where(a > 0.12)
     if len(xs) == 0: raise RuntimeError(f'nothing found in {os.path.basename(path)}')
     pad = int(0.015 * max(bgr.shape[:2]))
