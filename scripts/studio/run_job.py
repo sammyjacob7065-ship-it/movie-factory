@@ -16,9 +16,9 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 TTS_URL = os.environ.get('TTS_URL', 'https://openai-edge-tts-9mrp.onrender.com') + '/v1/audio/speech'
-SB_URL = os.environ.get('SUPABASE_URL', '').rstrip('/')
-SB_KEY = os.environ.get('SUPABASE_SERVICE_KEY', '')
-BUCKET = os.environ.get('SUPABASE_BUCKET', 'betrayer-assets')
+SB_URL = ''.join(os.environ.get('SUPABASE_URL', '').split()).rstrip('/')       # secrets often carry a hidden new line: strip it
+SB_KEY = ''.join(os.environ.get('SUPABASE_SERVICE_KEY', '').split())
+BUCKET = ''.join(os.environ.get('SUPABASE_BUCKET', '').split()) or 'betrayer-assets'
 SUPPORTED = ('pouch', 'box', 'flat')
 
 
